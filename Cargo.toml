@@ -1,0 +1,17 @@
+[package]
+name = "game_network"
+version = "0.1.0"
+authors = ["Jake Askeland <jake.askeland@gmail.com>"]
+
+[lib]
+name = "game_network"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example"
+path = "example/main.rs"
+
+[dependencies]
+bincode = "1.0.0"
+serde = "1.0.27"
+serde_derive = "1.0.27"
