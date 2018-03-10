@@ -1,14 +1,93 @@
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate bincode;
 
+use std::sync::mpsc;
 use std::net::{SocketAddr, UdpSocket};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
+pub struct Credentials {
+    username: String,
+}
+
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug, Hash, Eq)]
+pub struct ClientId(usize);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BitVec {
     storage: Vec<u32>, // Storage space for bits.
     len_of_last: u8, // Bits in use in the last element of storage.
+}
+
+/// Represents a compressed `VecDeque<BitVec>` where each `BitVec` has the same length.
+/// This data structure is used to implement the networking strategy described by
+/// https://gafferongames.com/post/deterministic_lockstep/
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct CompressedBitVec {
+    // Compressed vector of BitVecs.
+    bits: BitVec,
+
+    // Number of bits in each of the original BitVecs before they were compressed.
+    element_size: usize,
+}
+
+pub enum SendError {
+    FailedToCompress,
+    FailedToSerialize(Box<bincode::ErrorKind>),
+    FailedToSend(std::io::Error),
+}
+
+pub enum RecvError {
+    FailedToReceive(std::io::Error),
+    FailedToDeserialize(Box<bincode::ErrorKind>),
+    FailedToDecompress,
+    FailedToSerializeAck(Box<bincode::ErrorKind>),
+    FailedToSendAck(std::io::Error),
+}
+
+pub struct ControllerSequence {
+    start_tick: usize, // Game tick of first element in seq.
+    seq: VecDeque<BitVec>, // Sequence of game controller states.
+    client_id: ClientId, // Identifies the client associated with this control sequence.
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CompressedControllerSequence {
+    start_tick: usize,
+    comp_seq: CompressedBitVec,
+    client_id: ClientId,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+enum ClientMessage {
+    JoinRequest(Credentials),
+    ControllerInput(CompressedControllerSequence),
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+enum ServerMessage<StateT>
+where
+    StateT: serde::Serialize,
+{
+    JoinConfirmation,
+    LastTickReceived(usize),
+    WorldState(StateT),
+}
+
+pub struct Client<StateT> {
+    socket: UdpSocket,
+    server_addr: SocketAddr,
+    self_addr: SocketAddr,
+    controller_seq: ControllerSequence,
+    state_sender: mpsc::Sender<StateT>,
+}
+
+pub struct Server {
+    socket: UdpSocket,
+    self_addr: SocketAddr,
+    client_inputs: HashMap<ClientId, ControllerSequence>,
 }
 
 impl BitVec {
@@ -166,18 +245,6 @@ fn compress(element_size: usize, seq: &VecDeque<BitVec>) -> Option<BitVec> {
     Some(payload)
 }
 
-/// Represents a compressed `VecDeque<BitVec>` where each `BitVec` has the same length.
-/// This data structure is used to implement the networking strategy described by
-/// https://gafferongames.com/post/deterministic_lockstep/
-#[derive(Serialize, Deserialize)]
-pub struct CompressedBitVec {
-    // Compressed vector of BitVecs.
-    bits: BitVec,
-
-    // Number of bits in each of the original BitVecs before they were compressed.
-    element_size: usize,
-}
-
 impl CompressedBitVec {
     /// Creates a compressed representation of a series of equally sized `BitVec`s.
     /// If `seq` are not equally sized, returns `None`.
@@ -197,32 +264,6 @@ impl CompressedBitVec {
 }
 
 
-pub enum SendError {
-    FailedToCompress,
-    FailedToSerialize(Box<bincode::ErrorKind>),
-    FailedToSend(std::io::Error),
-}
-
-pub enum RecvError {
-    FailedToReceive(std::io::Error),
-    FailedToDeserialize(Box<bincode::ErrorKind>),
-    FailedToDecompress,
-    FailedToSerializeAck(Box<bincode::ErrorKind>),
-    FailedToSendAck(std::io::Error),
-}
-
-pub struct ControllerSequence {
-    start_tick: usize, // Game tick of first element in seq.
-    seq: VecDeque<BitVec>, // Sequence of game controller states.
-    client_id: usize, // Identifies the client associated with this control sequence.
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CompressedControllerSequence {
-    start_tick: usize,
-    comp_seq: CompressedBitVec,
-    client_id: usize,
-}
 
 impl ControllerSequence {
     pub fn push(&mut self, bit_vec: BitVec) {
@@ -268,21 +309,9 @@ impl CompressedControllerSequence {
     }
 }
 
-pub struct Client {
-    socket: UdpSocket,
-    server_addr: SocketAddr,
-    self_addr: SocketAddr,
-    controller_seq: ControllerSequence,
-    max_seq_len: usize, // TODO limit the length of controller_seq and thus the max datagram size.
-}
-
-impl Client {
-    fn bind(&mut self) -> std::io::Result<()> {
-        self.socket = UdpSocket::bind(self.self_addr)?;
-        Ok(())
-    }
-
+impl<StateT> Client<StateT> {
     fn connect(&mut self) -> std::io::Result<()> {
+        self.socket = UdpSocket::bind(self.self_addr)?;
         self.socket.connect(self.server_addr)
     }
 
@@ -292,7 +321,9 @@ impl Client {
                 SendError::FailedToCompress,
             )?;
 
-            let encoded: Vec<u8> = bincode::serialize(&payload).map_err(|err| {
+            let controller_input = ClientMessage::ControllerInput(payload);
+
+            let encoded: Vec<u8> = bincode::serialize(&controller_input).map_err(|err| {
                 SendError::FailedToSerialize(err)
             })?;
 
@@ -306,7 +337,29 @@ impl Client {
         Ok(())
     }
 
-    pub fn receive(&mut self) -> Result<(), RecvError> {
+    fn handle_last_tick_received(&mut self, last_tick: usize) -> Result<(), RecvError> {
+        // Now we remove the controller inputs the server has ACK'd.
+        self.controller_seq.remove_till_tick(last_tick + 1);
+        Ok(())
+    }
+
+    fn handle_join_confirmation(&self) -> Result<(), RecvError> {
+        Ok(())
+    }
+
+    fn handle_world_state<'de>(&mut self, state: StateT) -> Result<(), RecvError>
+    where
+        StateT: serde::Deserialize<'de>,
+        StateT: serde::Serialize,
+    {
+        Ok(())
+    }
+
+    pub fn receive(&mut self) -> Result<(), RecvError>
+    where
+        StateT: serde::de::DeserializeOwned,
+        StateT: serde::Serialize,
+    {
         // Receive ACK only from the connected server.
         let mut buf = Vec::<u8>::new();
         self.socket.recv(&mut buf).map_err(|err| {
@@ -315,49 +368,47 @@ impl Client {
 
         // Deserialize the received datagram.
         // The ACK contains the latest controller input the server has received from us.
-        let latest_tick_received: usize = bincode::deserialize(&buf).map_err(|err| {
+        let server_message: ServerMessage<StateT> = bincode::deserialize(&buf[..]).map_err(|err| {
             RecvError::FailedToDeserialize(err)
         })?;
 
-        // Now we remove the controller inputs the server has ACK'd.
-        self.controller_seq.remove_till_tick(
-            latest_tick_received + 1,
-        );
-
-        Ok(())
+        match server_message {
+            ServerMessage::LastTickReceived(tick) => self.handle_last_tick_received(tick),
+            ServerMessage::JoinConfirmation => self.handle_join_confirmation(),
+            ServerMessage::WorldState(state) => self.handle_world_state(state),
+        }
     }
 }
 
-pub struct Server {
-    socket: UdpSocket,
-    self_addr: SocketAddr,
-}
-
-impl Server {
+impl<'de> Server {
     fn bind(&mut self) -> std::io::Result<()> {
         self.socket = UdpSocket::bind(self.self_addr)?;
         Ok(())
     }
 
-    pub fn receive(&self) -> Result<ControllerSequence, RecvError> {
-        // Receive inputs from anyone.
-        let mut buf = Vec::<u8>::new();
-        let (_, src) = self.socket.recv_from(&mut buf).map_err(|err| {
-            RecvError::FailedToReceive(err)
-        })?;
-
-        // Deserialize the received datagram.
-        let decode: CompressedControllerSequence = bincode::deserialize(&buf).map_err(|err| {
-            RecvError::FailedToDeserialize(err)
-        })?;
-
-        // Decompressed the deserialized controller input sequence.
-        let controller_seq = decode.to_controller_sequence().ok_or(
+    fn handle_controller<StateT>(
+        &mut self,
+        input: CompressedControllerSequence,
+        src: SocketAddr,
+    ) -> Result<(), RecvError>
+    where
+        StateT: serde::Deserialize<'de>,
+        StateT: serde::Serialize,
+    {
+        // Decompress the deserialized controller input sequence.
+        let controller_seq = input.to_controller_sequence().ok_or(
             RecvError::FailedToDecompress,
         )?;
 
         // Compute game tick of last controller input received.
-        let last_tick: usize = controller_seq.start_tick + controller_seq.seq.len();
+        let last_tick: ServerMessage<StateT> =
+            ServerMessage::LastTickReceived(controller_seq.start_tick + controller_seq.seq.len());
+
+        // Add or update the inputs in the client inputs map.
+        self.client_inputs.insert(
+            controller_seq.client_id,
+            controller_seq,
+        );
 
         // Serialize the tick.
         let encode = bincode::serialize(&last_tick).map_err(|err| {
@@ -369,8 +420,45 @@ impl Server {
             RecvError::FailedToSendAck(err)
         })?;
 
-        // Return the controller sequence.
-        Ok(controller_seq)
+        Ok(())
+    }
+
+    fn handle_join_request<StateT>(
+        &mut self,
+        cred: Credentials,
+        src: SocketAddr,
+    ) -> Result<(), RecvError>
+    where
+        StateT: serde::Deserialize<'de>,
+        StateT: serde::Serialize,
+    {
+
+        // TODO
+
+        Ok(())
+    }
+
+    pub fn receive<StateT>(&mut self) -> Result<(), RecvError>
+    where
+        StateT: serde::Deserialize<'de>,
+        StateT: serde::Serialize,
+    {
+
+        // Receive inputs from anyone.
+        let mut buf = Vec::<u8>::new();
+        let (_, src) = self.socket.recv_from(&mut buf).map_err(|err| {
+            RecvError::FailedToReceive(err)
+        })?;
+
+        // Deserialize the received datagram.
+        let client_message: ClientMessage = bincode::deserialize(&buf).map_err(|err| {
+            RecvError::FailedToDeserialize(err)
+        })?;
+
+        match client_message {
+            ClientMessage::ControllerInput(input) => self.handle_controller::<StateT>(input, src),
+            ClientMessage::JoinRequest(cred) => self.handle_join_request::<StateT>(cred, src),
+        }
     }
 }
 
