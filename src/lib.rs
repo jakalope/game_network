@@ -3,9 +3,12 @@ extern crate serde;
 extern crate serde_derive;
 extern crate bincode;
 
+mod bitvec;
+mod controller_sequence;
+
 use std::sync::mpsc;
 use std::net::{SocketAddr, UdpSocket};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Credentials {
@@ -14,24 +17,6 @@ pub struct Credentials {
 
 #[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug, Hash, Eq)]
 pub struct ClientId(usize);
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct BitVec {
-    storage: Vec<u32>, // Storage space for bits.
-    len_of_last: u8, // Bits in use in the last element of storage.
-}
-
-/// Represents a compressed `VecDeque<BitVec>` where each `BitVec` has the same length.
-/// This data structure is used to implement the networking strategy described by
-/// https://gafferongames.com/post/deterministic_lockstep/
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct CompressedBitVec {
-    // Compressed vector of BitVecs.
-    bits: BitVec,
-
-    // Number of bits in each of the original BitVecs before they were compressed.
-    element_size: usize,
-}
 
 pub enum SendError {
     FailedToCompress,
@@ -47,32 +32,38 @@ pub enum RecvError {
     FailedToSendAck(std::io::Error),
 }
 
-pub struct ControllerSequence {
-    start_tick: usize, // Game tick of first element in seq.
-    seq: VecDeque<BitVec>, // Sequence of game controller states.
-    client_id: ClientId, // Identifies the client associated with this control sequence.
+/// A server's response to a `ClientMessage::JoinRequest`. If a `JoinRequest` was rejected, a
+/// reason will be provided. Otherwise, a simple `Confirmation` is sent before world states begin
+/// streaming.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum JoinResponse {
+    RejctionReason(String),
+    Confirmation,
 }
 
+/// Represents all possible message types a `Client` can send a `Server`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct CompressedControllerSequence {
-    start_tick: usize,
-    comp_seq: CompressedBitVec,
-    client_id: ClientId,
-}
+pub enum ClientMessage {
+    /// A message to send to the server that will be visible to all players.
+    ChatMessage(String),
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-enum ClientMessage {
+    /// Request to join the server with the given user's `Credentials`.
     JoinRequest(Credentials),
-    ControllerInput(CompressedControllerSequence),
+
+    /// A compressed series of control inputs -- one for each game tick since the last
+    /// `ServerMessage::LastTickReceived` value.
+    ControllerInput(controller_sequence::CompressedControllerSequence),
 }
 
+/// Represents all possible message types a `Server` can send a `Client`.
 #[derive(Serialize, Deserialize, Clone)]
-enum ServerMessage<StateT>
+pub enum ServerMessage<StateT>
 where
     StateT: serde::Serialize,
 {
-    JoinConfirmation,
     LastTickReceived(usize),
+    ChatMessage { username: String, message: String },
+    JoinResponse(JoinResponse),
     WorldState(StateT),
 }
 
@@ -80,233 +71,14 @@ pub struct Client<StateT> {
     socket: UdpSocket,
     server_addr: SocketAddr,
     self_addr: SocketAddr,
-    controller_seq: ControllerSequence,
+    controller_seq: controller_sequence::ControllerSequence,
     state_sender: mpsc::Sender<StateT>,
 }
 
 pub struct Server {
     socket: UdpSocket,
     self_addr: SocketAddr,
-    client_inputs: HashMap<ClientId, ControllerSequence>,
-}
-
-impl BitVec {
-    pub fn new() -> Self {
-        BitVec {
-            storage: vec![0u32],
-            len_of_last: 0u8,
-        }
-    }
-
-    pub fn from_slice(slice: &[bool]) -> Self {
-        let mut bit_vec = BitVec::new();
-        for bit in slice {
-            bit_vec.push(*bit);
-        }
-        bit_vec
-    }
-
-    pub fn len(&self) -> usize {
-        32usize * (self.storage.len() - 1) + (self.len_of_last as usize)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len_of_last == 0
-    }
-
-    pub fn push(&mut self, bit: bool) {
-        if self.len_of_last == 32 {
-            // We're at the end of the current u32, we need to add a new one and set the first bit.
-            self.storage.push(bit as u32);
-            self.len_of_last = 1;
-        } else if bit == true {
-            // Explicitly set a one-bit in the next available position.
-            // This is safe as long as len_of_last is always between 0 and 31.
-            let new_bit = 0x01u32.checked_shl(self.len_of_last as u32).unwrap();
-            // Unwrap is safe here as long as we maintain at least 1 element of storage.
-            *self.storage.last_mut().unwrap() = self.storage.last().unwrap() | new_bit;
-            self.len_of_last += 1;
-        } else {
-            // No need to explicitly set a bit. Just add a zero by incrementing the length.
-            self.len_of_last += 1;
-        }
-    }
-
-    pub fn append(&mut self, other: &BitVec) {
-        for bit in other {
-            self.push(bit);
-        }
-    }
-
-    pub fn range(&self, range: std::ops::Range<usize>) -> Option<Self> {
-        let mut bitvec = BitVec::new();
-        for idx in range {
-            let bit = self.get(idx)?;
-            bitvec.push(bit);
-        }
-        Some(bitvec)
-    }
-
-    pub fn get(&self, index: usize) -> Option<bool> {
-        if index >= self.len() {
-            return None;
-        }
-
-        let outer_idx = index / 32;
-        let element = self.storage.get(outer_idx)?;
-        let inner_idx = (index % 32) as u32;
-        let bit = 0x01u32.checked_shl(inner_idx).unwrap();
-
-        Some((*element & bit) != 0)
-    }
-}
-
-pub struct BitVecIter<'a> {
-    bitvec: &'a BitVec, // Object being iterated over.
-    bit_counter: usize, // Current bit pointed to by the iterator.
-}
-
-impl<'a> std::iter::Iterator for BitVecIter<'a> {
-    type Item = bool;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.bitvec.get(self.bit_counter) {
-            Some(b) => {
-                self.bit_counter += 1;
-                return Some(b);
-            }
-            None => None,
-        }
-    }
-}
-
-impl<'a> std::iter::IntoIterator for &'a BitVec {
-    type Item = bool;
-    type IntoIter = BitVecIter<'a>;
-    fn into_iter(self) -> Self::IntoIter {
-        BitVecIter {
-            bitvec: &self,
-            bit_counter: 0,
-        }
-    }
-}
-
-fn decompress(element_size: usize, payload: &BitVec) -> Option<VecDeque<BitVec>> {
-    let mut seq = VecDeque::<BitVec>::new();
-    let mut idx = 0usize;
-    let mut previous: Option<BitVec> = None;
-    while idx < payload.len() {
-        let bit = payload.get(idx)?;
-        match bit {
-            true => {
-                let range = std::ops::Range::<usize> {
-                    start: idx + 1,
-                    end: idx + element_size + 1,
-                };
-                let previous_element = payload.range(range)?;
-                seq.push_back(previous_element.clone());
-                previous = Some(previous_element);
-                idx += element_size + 1;
-            }
-            false => {
-                if let Some(element) = previous.clone() {
-                    seq.push_back(element);
-                    idx += 1;
-                } else {
-                    return None;
-                }
-            }
-        }
-    }
-
-    Some(seq)
-}
-
-fn compress(element_size: usize, seq: &VecDeque<BitVec>) -> Option<BitVec> {
-    // For each contiguous, equal element, add a zero-bit. For each contiguous element that
-    // isn't equal to the previous, add a one-bit followed by the new value.
-    let mut previous: Option<&BitVec> = None;
-    let mut payload = BitVec::new();
-    for element in seq {
-        if element.len() != element_size {
-            // Only equal-length BitVecs are supported.
-            return None;
-        }
-        if previous.is_none() || *element != *previous.unwrap() {
-            // Store non-repetitive elements directly.
-            payload.push(true);
-            payload.append(element);
-            previous = Some(element);
-        } else if *element == *previous.unwrap() {
-            // Compress repetitive elements as a single zero-bit.
-            payload.push(false);
-        }
-    }
-
-    Some(payload)
-}
-
-impl CompressedBitVec {
-    /// Creates a compressed representation of a series of equally sized `BitVec`s.
-    /// If `seq` are not equally sized, returns `None`.
-    pub fn compress(seq: &VecDeque<BitVec>) -> Option<Self> {
-        let element_size = seq.front().map_or(0, |element| element.len());
-        let bits = compress(element_size, seq);
-        Some(CompressedBitVec {
-            bits: bits?,
-            element_size: element_size,
-        })
-    }
-
-    /// Decompresses `self` into a `VecDeque` of equally sized `BitVec`s.
-    pub fn decompress(&self) -> Option<VecDeque<BitVec>> {
-        decompress(self.element_size, &self.bits)
-    }
-}
-
-
-
-impl ControllerSequence {
-    pub fn push(&mut self, bit_vec: BitVec) {
-        self.seq.push_back(bit_vec);
-    }
-
-    pub fn to_compressed(&self) -> Option<CompressedControllerSequence> {
-        let comp_seq = CompressedBitVec::compress(&self.seq)?;
-        Some(CompressedControllerSequence {
-            start_tick: self.start_tick,
-            comp_seq: comp_seq,
-            client_id: self.client_id,
-        })
-    }
-
-    pub fn last_tick(&self) -> usize {
-        self.start_tick + self.seq.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.seq.is_empty()
-    }
-
-    pub fn remove_till_tick(&mut self, tick: usize) {
-        let last_tick = self.last_tick();
-        if last_tick > tick {
-            let tick_count = last_tick - tick;
-            let end = std::cmp::min(tick_count, self.seq.len());
-            self.seq.drain(0..end);
-        }
-    }
-}
-
-
-impl CompressedControllerSequence {
-    pub fn to_controller_sequence(self) -> Option<ControllerSequence> {
-        let seq = self.comp_seq.decompress()?;
-        Some(ControllerSequence {
-            start_tick: self.start_tick,
-            seq: seq,
-            client_id: self.client_id,
-        })
-    }
+    client_inputs: HashMap<ClientId, controller_sequence::ControllerSequence>,
 }
 
 impl<StateT> Client<StateT> {
@@ -343,7 +115,7 @@ impl<StateT> Client<StateT> {
         Ok(())
     }
 
-    fn handle_join_confirmation(&self) -> Result<(), RecvError> {
+    fn handle_join_response(&self, response: JoinResponse) -> Result<(), RecvError> {
         Ok(())
     }
 
@@ -352,6 +124,10 @@ impl<StateT> Client<StateT> {
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
     {
+        Ok(())
+    }
+
+    fn handle_chat_message(&mut self, user: String, msg: String) -> Result<(), RecvError> {
         Ok(())
     }
 
@@ -374,8 +150,12 @@ impl<StateT> Client<StateT> {
 
         match server_message {
             ServerMessage::LastTickReceived(tick) => self.handle_last_tick_received(tick),
-            ServerMessage::JoinConfirmation => self.handle_join_confirmation(),
+            ServerMessage::JoinResponse(response) => self.handle_join_response(response),
             ServerMessage::WorldState(state) => self.handle_world_state(state),
+            ServerMessage::ChatMessage {
+                username: user,
+                message: msg,
+            } => self.handle_chat_message(user, msg),
         }
     }
 }
@@ -388,7 +168,7 @@ impl<'de> Server {
 
     fn handle_controller<StateT>(
         &mut self,
-        input: CompressedControllerSequence,
+        input: controller_sequence::CompressedControllerSequence,
         src: SocketAddr,
     ) -> Result<(), RecvError>
     where
@@ -402,13 +182,11 @@ impl<'de> Server {
 
         // Compute game tick of last controller input received.
         let last_tick: ServerMessage<StateT> =
-            ServerMessage::LastTickReceived(controller_seq.start_tick + controller_seq.seq.len());
+            ServerMessage::LastTickReceived(controller_seq.last_tick());
 
+        // TODO get client_id from src.
         // Add or update the inputs in the client inputs map.
-        self.client_inputs.insert(
-            controller_seq.client_id,
-            controller_seq,
-        );
+        self.client_inputs.insert(ClientId(0), controller_seq);
 
         // Serialize the tick.
         let encode = bincode::serialize(&last_tick).map_err(|err| {
@@ -428,6 +206,17 @@ impl<'de> Server {
         cred: Credentials,
         src: SocketAddr,
     ) -> Result<(), RecvError>
+    where
+        StateT: serde::Deserialize<'de>,
+        StateT: serde::Serialize,
+    {
+
+        // TODO
+
+        Ok(())
+    }
+
+    fn handle_chat_message<StateT>(&mut self, msg: String, src: SocketAddr) -> Result<(), RecvError>
     where
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
@@ -458,6 +247,7 @@ impl<'de> Server {
         match client_message {
             ClientMessage::ControllerInput(input) => self.handle_controller::<StateT>(input, src),
             ClientMessage::JoinRequest(cred) => self.handle_join_request::<StateT>(cred, src),
+            ClientMessage::ChatMessage(msg) => self.handle_chat_message::<StateT>(msg, src),
         }
     }
 }
