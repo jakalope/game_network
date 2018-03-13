@@ -14,8 +14,17 @@ pub struct CompressedControllerSequence {
 }
 
 impl ControllerSequence {
-    pub fn push(&mut self, bit_vec: BitVec) {
-        self.seq.push_back(bit_vec);
+    pub fn push(&mut self, bitvec: BitVec) {
+        self.seq.push_back(bitvec);
+    }
+
+    pub fn append(&mut self, cont_seq: ControllerSequence) {
+        let tick_delta = cont_seq.start_tick as i64 - self.start_tick as i64;
+        if tick_delta > 0 {
+            for bitvec in cont_seq.seq.iter().skip(tick_delta as usize) {
+                self.push(bitvec.clone());
+            }
+        }
     }
 
     pub fn to_compressed(&self) -> Option<CompressedControllerSequence> {

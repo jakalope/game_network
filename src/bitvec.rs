@@ -191,3 +191,98 @@ impl CompressedBitVec {
         decompress(self.element_size, &self.bits)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn bitvec_empty() {
+        // Tests the requirement that all bitvecs must have at least one storage element.
+        let bitvec = BitVec::new();
+        assert_eq!(0, bitvec.len());
+        assert!(bitvec.is_empty());
+    }
+
+    #[test]
+    fn bitvec_not_empty() {
+        let mut bitvec = BitVec::new();
+        bitvec.push(true);
+        assert_eq!(1, bitvec.len());
+        assert_eq!(false, bitvec.is_empty());
+    }
+
+    #[test]
+    fn bitvec_gt_32() {
+        let mut bitvec = BitVec::new();
+        for i in 0..33 {
+            bitvec.push((i % 2) == 1);
+        }
+        for i in 0..33 {
+            assert_eq!(Some((i % 2) == 1), bitvec.get(i));
+        }
+        assert_eq!(33, bitvec.len());
+        assert_eq!(None, bitvec.get(33));
+    }
+
+    #[test]
+    fn bitvec_push_get() {
+        let mut bitvec = BitVec::new();
+        assert_eq!(None, bitvec.get(0));
+        assert_eq!(None, bitvec.get(1));
+
+        bitvec.push(true);
+        assert_eq!(Some(true), bitvec.get(0));
+        assert_eq!(None, bitvec.get(1));
+
+        bitvec.push(false);
+        assert_eq!(Some(true), bitvec.get(0));
+        assert_eq!(Some(false), bitvec.get(1));
+        assert_eq!(None, bitvec.get(2));
+    }
+
+    #[test]
+    fn bitvec_range() {
+        let first = BitVec::from_slice(&[false, true, false]);
+        assert_eq!(first, first.range(0..3).unwrap());
+        assert_eq!(None, first.range(0..4));
+    }
+
+    #[test]
+    fn bitvec_append() {
+        let first = BitVec::from_slice(&[false, true, false]);
+        let mut second = BitVec::new();
+        second.push(true);
+        second.append(&first);
+        assert_eq!(first, second.range(1..4).unwrap());
+        assert!(first != second.range(0..3).unwrap());
+        assert!(first != second.range(1..3).unwrap());
+    }
+
+    #[test]
+    fn compress() {
+        let bits = BitVec::from_slice(&[true, true, false]);
+        let vec = VecDeque::from(vec![bits.clone(), bits.clone()]);
+        let comp = super::compress(3, &vec).unwrap();
+        let expected = BitVec::from_slice(&[true, true, true, false, false]);
+        assert_eq!(expected, comp);
+    }
+
+    #[test]
+    fn decompress() {
+        let comp = BitVec::from_slice(&[true, true, true, false, false]);
+        let bits = BitVec::from_slice(&[true, true, false]);
+        let expected = VecDeque::from(vec![bits.clone(), bits.clone()]);
+        let decomp = super::decompress(3, &comp).unwrap();
+        assert_eq!(expected, decomp);
+    }
+
+    #[test]
+    fn round_trip() {
+        let bits = BitVec::from_slice(&[true, true, false]);
+        let expected = VecDeque::from(vec![bits.clone(), bits.clone()]);
+        let obj = CompressedBitVec::compress(&expected).unwrap();
+        let decomp = obj.decompress().unwrap();
+        assert_eq!(expected, decomp);
+    }
+}

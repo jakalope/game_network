@@ -2,6 +2,7 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate bincode;
+extern crate bidir_map;
 
 mod bitvec;
 mod controller_sequence;
@@ -9,14 +10,16 @@ mod controller_sequence;
 use std::sync::mpsc;
 use std::net::{SocketAddr, UdpSocket};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug, Hash, Eq)]
+pub struct Username(usize);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
 pub struct Credentials {
-    username: String,
+    pub username: Username,
+    pub password: String,
 }
-
-#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug, Hash, Eq)]
-pub struct ClientId(usize);
 
 pub enum SendError {
     FailedToCompress,
@@ -25,6 +28,7 @@ pub enum SendError {
 }
 
 pub enum RecvError {
+    UnknownSource(SocketAddr),
     FailedToReceive(std::io::Error),
     FailedToDeserialize(Box<bincode::ErrorKind>),
     FailedToDecompress,
@@ -37,16 +41,15 @@ pub enum RecvError {
 /// streaming.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum JoinResponse {
-    RejctionReason(String),
     Confirmation,
+    AuthenticationError,
 }
 
 /// Represents all possible message types a `Client` can send a `Server`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ClientMessage {
     /// A message to send to the server that will be visible to all players.
-    ChatMessage(String),
-
+    // ChatMessage(String),
     /// Request to join the server with the given user's `Credentials`.
     JoinRequest(Credentials),
 
@@ -62,7 +65,7 @@ where
     StateT: serde::Serialize,
 {
     LastTickReceived(usize),
-    ChatMessage { username: String, message: String },
+    // ChatMessage { username: String, message: String },
     JoinResponse(JoinResponse),
     WorldState(StateT),
 }
@@ -78,7 +81,8 @@ pub struct Client<StateT> {
 pub struct Server {
     socket: UdpSocket,
     self_addr: SocketAddr,
-    client_inputs: HashMap<ClientId, controller_sequence::ControllerSequence>,
+    client_inputs: HashMap<Username, controller_sequence::ControllerSequence>,
+    address_user: bidir_map::BidirMap<SocketAddr, Username>,
 }
 
 impl<StateT> Client<StateT> {
@@ -152,10 +156,10 @@ impl<StateT> Client<StateT> {
             ServerMessage::LastTickReceived(tick) => self.handle_last_tick_received(tick),
             ServerMessage::JoinResponse(response) => self.handle_join_response(response),
             ServerMessage::WorldState(state) => self.handle_world_state(state),
-            ServerMessage::ChatMessage {
-                username: user,
-                message: msg,
-            } => self.handle_chat_message(user, msg),
+            // ServerMessage::ChatMessage {
+            //     username: user,
+            //     message: msg,
+            // } => self.handle_chat_message(user, msg),
         }
     }
 }
@@ -168,13 +172,18 @@ impl<'de> Server {
 
     fn handle_controller<StateT>(
         &mut self,
-        input: controller_sequence::CompressedControllerSequence,
         src: SocketAddr,
-    ) -> Result<(), RecvError>
+        input: controller_sequence::CompressedControllerSequence,
+    ) -> Result<ServerMessage<StateT>, RecvError>
     where
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
     {
+        // Lookup the username given the source socket address.
+        let user = self.address_user.get_by_first(&src).ok_or(
+            RecvError::UnknownSource(src),
+        )?;
+
         // Decompress the deserialized controller input sequence.
         let controller_seq = input.to_controller_sequence().ok_or(
             RecvError::FailedToDecompress,
@@ -184,45 +193,112 @@ impl<'de> Server {
         let last_tick: ServerMessage<StateT> =
             ServerMessage::LastTickReceived(controller_seq.last_tick());
 
-        // TODO get client_id from src.
-        // Add or update the inputs in the client inputs map.
-        self.client_inputs.insert(ClientId(0), controller_seq);
+        // Append the inputs in the client inputs map.
+        match self.client_inputs.entry(*user) {
+            Entry::Occupied(entry) => {
+                entry.into_mut().append(controller_seq);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(controller_seq);
+            }
+        }
 
-        // Serialize the tick.
-        let encode = bincode::serialize(&last_tick).map_err(|err| {
-            RecvError::FailedToSerializeAck(err)
-        })?;
-
-        // Send the tick.
-        self.socket.send_to(&encode, src).map_err(|err| {
-            RecvError::FailedToSendAck(err)
-        })?;
-
-        Ok(())
+        // Return the appropriate ACK.
+        Ok(last_tick)
     }
 
     fn handle_join_request<StateT>(
         &mut self,
-        cred: Credentials,
         src: SocketAddr,
-    ) -> Result<(), RecvError>
+        cred: Credentials,
+    ) -> Result<ServerMessage<StateT>, RecvError>
     where
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
     {
+        // Authenticate the user before proceeding.
+        if !self.authenticate_user(&cred) {
+            // From the server's perspective, this isn't an error. It's request that deserves a
+            // negative response.
+            return Ok(ServerMessage::JoinResponse(
+                JoinResponse::AuthenticationError,
+            ));
+        }
 
-        // TODO
+        let mut disconnect_user: Option<Username> = None;
+        if let Some(user) = self.address_user.get_by_first(&src) {
+            // The source address is already associated with a user.
+            if *user == cred.username {
+                // The user is already connected. Just send back a confirmation. This might happen
+                // if the user hasn't received their confirmation from a previous attempt.
+                return Ok(ServerMessage::JoinResponse(JoinResponse::Confirmation));
+            } else {
+                // The source address holder seems to be changing their username but hasn't
+                // disconnected first. Boot `user` and reconnect.
+                disconnect_user = Some(*user);
+            }
+        }
 
-        Ok(())
+        if let Some(user) = disconnect_user {
+            self.disconnect_user(&user);
+        }
+
+        self.connect_user(&src, &cred.username);
+        Ok(ServerMessage::JoinResponse(JoinResponse::Confirmation))
     }
 
-    fn handle_chat_message<StateT>(&mut self, msg: String, src: SocketAddr) -> Result<(), RecvError>
+    fn connect_user(&mut self, src: &SocketAddr, user: &Username) {
+        self.address_user.insert(*src, *user);
+    }
+
+    fn disconnect_user(&mut self, user: &Username) {
+        self.address_user.remove_by_second(user);
+    }
+
+    fn authenticate_user(&self, cred: &Credentials) -> bool {
+        // TODO
+        true
+    }
+
+    //     fn handle_chat_message<StateT>(
+    //         &mut self,
+    //         src: SocketAddr,
+    //         msg: String,
+    //     ) -> Result<ServerMessage<StateT>, RecvError>
+    //     where
+    //         StateT: serde::Deserialize<'de>,
+    //         StateT: serde::Serialize,
+    //     {
+    //         // TODO Chat should be handled over TCP.
+    //         Ok(())
+    //     }
+
+    // fn broadcast_chat_message<StateT>(
+    //     &self,
+    //     src: SocketAddr,
+    //     msg: String,
+    // ) -> Result<ServerMessage<StateT>, RecvError> {
+    //     let Ok(user) = self.address_user.get_by_first(&src).ok_or(
+    //         RecvError::UnknownSource(src),
+    //     )?;
+    //     let mut displayed_message = user.clone();
+    //     displayed_message.push_str(": ");
+    //     displayed_message.push_str(msg);
+    //     Ok(ServerMessage::ChatMessage(displayed_message))
+    // }
+
+    pub fn broadcast_world_state<StateT>(&self, state: StateT) -> Result<(), SendError>
     where
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
     {
+        let encode = bincode::serialize(&state).map_err(|err| {
+            SendError::FailedToSerialize(err)
+        })?;
 
-        // TODO
+        for address_user in self.address_user.iter() {
+            self.socket.send_to(&encode, address_user.0);
+        }
 
         Ok(())
     }
@@ -232,7 +308,6 @@ impl<'de> Server {
         StateT: serde::Deserialize<'de>,
         StateT: serde::Serialize,
     {
-
         // Receive inputs from anyone.
         let mut buf = Vec::<u8>::new();
         let (_, src) = self.socket.recv_from(&mut buf).map_err(|err| {
@@ -244,105 +319,22 @@ impl<'de> Server {
             RecvError::FailedToDeserialize(err)
         })?;
 
-        match client_message {
-            ClientMessage::ControllerInput(input) => self.handle_controller::<StateT>(input, src),
-            ClientMessage::JoinRequest(cred) => self.handle_join_request::<StateT>(cred, src),
-            ClientMessage::ChatMessage(msg) => self.handle_chat_message::<StateT>(msg, src),
-        }
-    }
-}
+        let response = match client_message {
+            ClientMessage::ControllerInput(input) => self.handle_controller::<StateT>(src, input),
+            ClientMessage::JoinRequest(cred) => self.handle_join_request::<StateT>(src, cred),
+            // ClientMessage::ChatMessage(msg) => self.handle_chat_message::<StateT>(src, msg),
+        }?;
 
-#[cfg(test)]
-mod test {
-    use super::*;
+        // Serialize the tick.
+        let encode = bincode::serialize(&response).map_err(|err| {
+            RecvError::FailedToSerializeAck(err)
+        })?;
 
-    #[test]
-    fn bitvec_empty() {
-        // Tests the requirement that all bitvecs must have at least one storage element.
-        let bitvec = BitVec::new();
-        assert_eq!(0, bitvec.len());
-        assert!(bitvec.is_empty());
-    }
+        // Send the tick.
+        self.socket.send_to(&encode, src).map_err(|err| {
+            RecvError::FailedToSendAck(err)
+        })?;
 
-    #[test]
-    fn bitvec_not_empty() {
-        let mut bitvec = BitVec::new();
-        bitvec.push(true);
-        assert_eq!(1, bitvec.len());
-        assert_eq!(false, bitvec.is_empty());
-    }
-
-    #[test]
-    fn bitvec_gt_32() {
-        let mut bitvec = BitVec::new();
-        for i in 0..33 {
-            bitvec.push((i % 2) == 1);
-        }
-        for i in 0..33 {
-            assert_eq!(Some((i % 2) == 1), bitvec.get(i));
-        }
-        assert_eq!(33, bitvec.len());
-        assert_eq!(None, bitvec.get(33));
-    }
-
-    #[test]
-    fn bitvec_push_get() {
-        let mut bitvec = BitVec::new();
-        assert_eq!(None, bitvec.get(0));
-        assert_eq!(None, bitvec.get(1));
-
-        bitvec.push(true);
-        assert_eq!(Some(true), bitvec.get(0));
-        assert_eq!(None, bitvec.get(1));
-
-        bitvec.push(false);
-        assert_eq!(Some(true), bitvec.get(0));
-        assert_eq!(Some(false), bitvec.get(1));
-        assert_eq!(None, bitvec.get(2));
-    }
-
-    #[test]
-    fn bitvec_range() {
-        let first = BitVec::from_slice(&[false, true, false]);
-        assert_eq!(first, first.range(0..3).unwrap());
-        assert_eq!(None, first.range(0..4));
-    }
-
-    #[test]
-    fn bitvec_append() {
-        let first = BitVec::from_slice(&[false, true, false]);
-        let mut second = BitVec::new();
-        second.push(true);
-        second.append(&first);
-        assert_eq!(first, second.range(1..4).unwrap());
-        assert!(first != second.range(0..3).unwrap());
-        assert!(first != second.range(1..3).unwrap());
-    }
-
-    #[test]
-    fn compress() {
-        let bits = BitVec::from_slice(&[true, true, false]);
-        let vec = VecDeque::from(vec![bits.clone(), bits.clone()]);
-        let comp = super::compress(3, &vec).unwrap();
-        let expected = BitVec::from_slice(&[true, true, true, false, false]);
-        assert_eq!(expected, comp);
-    }
-
-    #[test]
-    fn decompress() {
-        let comp = BitVec::from_slice(&[true, true, true, false, false]);
-        let bits = BitVec::from_slice(&[true, true, false]);
-        let expected = VecDeque::from(vec![bits.clone(), bits.clone()]);
-        let decomp = super::decompress(3, &comp).unwrap();
-        assert_eq!(expected, decomp);
-    }
-
-    #[test]
-    fn round_trip() {
-        let bits = BitVec::from_slice(&[true, true, false]);
-        let expected = VecDeque::from(vec![bits.clone(), bits.clone()]);
-        let obj = CompressedBitVec::compress(&expected).unwrap();
-        let decomp = obj.decompress().unwrap();
-        assert_eq!(expected, decomp);
+        Ok(())
     }
 }
