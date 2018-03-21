@@ -2,6 +2,7 @@ use std;
 use std::collections::VecDeque;
 use bitvec::{BitVec, CompressedBitVec};
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct ControllerSequence {
     start_tick: usize, // Game tick of first element in seq.
     seq: VecDeque<BitVec>, // Sequence of game controller states.
@@ -14,6 +15,13 @@ pub struct CompressedControllerSequence {
 }
 
 impl ControllerSequence {
+    pub fn new() -> Self {
+        ControllerSequence {
+            start_tick: 0,
+            seq: VecDeque::new(),
+        }
+    }
+
     pub fn push(&mut self, bitvec: BitVec) {
         self.seq.push_back(bitvec);
     }
