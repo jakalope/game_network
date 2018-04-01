@@ -35,7 +35,7 @@ pub struct ServicerMessage {
     pub payload: ServicerPayload,
 }
 
-struct Server<StateT>
+pub struct Server<StateT>
 where
     StateT: serde::Serialize,
     StateT: Send,
