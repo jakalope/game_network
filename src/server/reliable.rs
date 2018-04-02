@@ -1,16 +1,16 @@
-use server;
-use server::low_latency;
-use msg;
-use controller_sequence as ctrl_seq;
-use std;
-use std::net::{TcpStream, TcpListener, UdpSocket};
-use std::sync::mpsc;
-use std::io::{Write, Read};
-use serde;
-use bincode;
-use spmc;
 use bidir_map;
+use bincode;
+use controller_sequence as ctrl_seq;
+use msg;
+use serde;
+use server::low_latency;
+use server;
+use spmc;
+use std::io::{Write, Read};
+use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std;
 
 /// Services a single client using a reliable transport (Tcp). Communicates messages to the
 /// application thread via an in-process queue.
@@ -77,9 +77,60 @@ where
     Ok(())
 }
 
+fn drain_receiver<M: Send>(receiver: &mut spmc::Receiver<M>) -> Option<Vec<M>> {
+    let mut msgs = vec![];
+    loop {
+        // Receive inputs from the application thread.
+        match receiver.try_recv() {
+            Ok(msg) => {
+                msgs.push(msg);
+            }
+            Err(spmc::TryRecvError::Empty) => {
+                return Some(msgs);
+            }
+            Err(spmc::TryRecvError::Disconnected) => {
+                // The application thread disconnected; we should begin shutting down.
+                return None;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_receiver_empty() {
+        let (mut to, mut from): (spmc::Sender<AtomicBool>, spmc::Receiver<AtomicBool>) =
+            spmc::channel();
+        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
+
+        // Expect zero messages to arrive.
+        assert_eq!(0, msgs.len());
+    }
+
+    #[test]
+    fn drain_receiver_nonempty() {
+        let (mut to, mut from) = spmc::channel();
+        to.send(AtomicBool::new(true)).unwrap();
+        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
+
+        // Expect exactly one message with a value of "true" to arrive.
+        assert_eq!(1, msgs.len());
+        assert_eq!(true, msgs[0].load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn drain_receiver_disconnected() {
+        let (mut to, mut from) = spmc::channel();
+        to.send(AtomicBool::new(true)).unwrap();
+        drop(to);
+
+        // Even though we sent something, if the channel has been disconnected, we don't want to
+        // process any further.
+        assert!(drain_receiver(&mut from).is_none());
+    }
 
     #[test]
     fn listener_start_stop() {
@@ -91,12 +142,10 @@ mod tests {
         handle = std::thread::spawn(|| {
             listen(listener, running_clone, |_| std::thread::spawn(|| {}))
         });
-
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Let "server_running" be false, causing the listener thread to join.
         server_running.store(false, Ordering::Relaxed);
-
         assert!(handle.join().unwrap().is_ok());
     }
 
@@ -217,7 +266,14 @@ impl Servicer {
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
-        let mut msg_vec = self.poll_application_thread();
+        let mut msg_vec = match drain_receiver(&mut self.from_application) {
+            Some(msgs) => msgs,
+            None => {
+                return Err(msg::CommError::Drop(
+                    msg::Drop::ApplicationThreadDisconnected,
+                ));
+            }
+        };
         for msg in msg_vec.drain(..) {
             let encoded_response = bincode::serialize(&msg).map_err(|err| {
                 msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
@@ -267,26 +323,6 @@ impl Servicer {
             },
         )?;
         Ok(())
-    }
-
-    fn poll_application_thread(&mut self) -> Vec<msg::reliable::ServerMessage> {
-        let mut msg_vec = vec![];
-        loop {
-            // Receive inputs from the application thread.
-            match self.from_application.try_recv() {
-                Ok(msg) => {
-                    msg_vec.push(msg);
-                }
-                Err(spmc::TryRecvError::Empty) => {
-                    return msg_vec;
-                }
-                Err(spmc::TryRecvError::Disconnected) => {
-                    // The application thread disconnected; we should begin shutting down.
-                    self.shutdown();
-                    return msg_vec;
-                }
-            }
-        }
     }
 
     fn shutdown(&mut self) {
