@@ -1,7 +1,7 @@
 use server;
 use server::reliable;
 use msg;
-use controller_sequence as ctrl_seq;
+use control;
 use std;
 use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::mpsc;
@@ -197,7 +197,7 @@ where
     fn handle_controller(
         &mut self,
         src: std::net::SocketAddr,
-        input: ctrl_seq::CompressedControllerSequence,
+        input: control::CompressedControllerSequence,
     ) -> Result<server::ServicerMessage, msg::CommError> {
         // Lookup the username given the source socket address.
         let user = self.address_user.get_by_first(&src).ok_or(

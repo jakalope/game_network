@@ -1,6 +1,5 @@
 use bidir_map;
 use bincode;
-use controller_sequence as ctrl_seq;
 use msg;
 use serde;
 use server::low_latency;

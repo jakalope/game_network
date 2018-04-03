@@ -11,6 +11,6 @@ extern crate spmc;
 mod msg;
 
 mod bitvec;
-mod controller_sequence;
+mod control;
 mod server;
 mod client;

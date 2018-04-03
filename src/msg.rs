@@ -1,5 +1,5 @@
 use bincode;
-use controller_sequence as ctrl_seq;
+use control;
 use serde;
 use std;
 use std::net::SocketAddrV4;
@@ -124,12 +124,14 @@ pub mod reliable {
 }
 
 pub mod low_latency {
+    use super::*;
+
     /// Represents messages a client can send to the server over a low-latency (Udp) transport.
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub enum ClientMessage {
         /// A compressed series of control inputs -- one for each game tick since the last tick
         /// received.
-        ControllerInput(super::ctrl_seq::CompressedControllerSequence),
+        ControllerInput(control::CompressedControllerSequence),
         /// Implies there is no message to send.
         None,
     }
@@ -138,7 +140,7 @@ pub mod low_latency {
     #[derive(Serialize, Deserialize, Clone)]
     pub enum ServerMessage<StateT>
     where
-        StateT: super::serde::Serialize,
+        StateT: serde::Serialize,
     {
         /// The latest segment of world state needed by a specific client.
         WorldState(StateT),

@@ -2,7 +2,7 @@ mod low_latency;
 mod reliable;
 
 use msg;
-use controller_sequence as ctrl_seq;
+use control;
 use std;
 use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::mpsc;
@@ -18,7 +18,7 @@ pub enum ServicerPayload {
     /// A message that will be visible to all players.
     ChatMessage(String),
     /// A series of control inputs -- one for each game tick since the last tick received.
-    ControllerSequence(ctrl_seq::ControllerSequence),
+    ControllerSequence(control::ControllerSequence),
     ///
     ClientData(msg::ClientData),
     /// Implies there is no message to send.
