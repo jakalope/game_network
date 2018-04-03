@@ -32,7 +32,7 @@ where
         server_addr: SocketAddrV4,
         to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
     ) -> std::io::Result<Self> {
-        let mut udp_socket = UdpSocket::bind(&self_addr)?;
+        let udp_socket = UdpSocket::bind(&self_addr)?;
         udp_socket.connect(&server_addr)?;
         Ok(Servicer {
             udp_socket: udp_socket,
