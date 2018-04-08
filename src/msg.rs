@@ -5,7 +5,7 @@ use std;
 use std::net::SocketAddrV4;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Hash, Eq)]
-pub struct Username(String);
+pub struct Username(pub String);
 
 /// Data owned by the server about a client.
 #[derive(Clone)]
@@ -137,7 +137,7 @@ pub mod low_latency {
     }
 
     /// Represents messages passed from the server to a client over a low-latency (Udp) transport.
-    #[derive(Serialize, Deserialize, Clone)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub enum ServerMessage<StateT>
     where
         StateT: serde::Serialize,

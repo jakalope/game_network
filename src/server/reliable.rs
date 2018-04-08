@@ -10,6 +10,7 @@ use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std;
+use super::drain_receiver;
 
 /// Services a single client using a reliable transport (Tcp). Communicates messages to the
 /// application thread via an in-process queue.
@@ -74,99 +75,6 @@ where
         servicer_thread.join().unwrap();
     }
     Ok(())
-}
-
-fn drain_receiver<M: Send>(receiver: &mut spmc::Receiver<M>) -> Option<Vec<M>> {
-    let mut msgs = vec![];
-    loop {
-        // Receive inputs from the application thread.
-        match receiver.try_recv() {
-            Ok(msg) => {
-                msgs.push(msg);
-            }
-            Err(spmc::TryRecvError::Empty) => {
-                return Some(msgs);
-            }
-            Err(spmc::TryRecvError::Disconnected) => {
-                // The application thread disconnected; we should begin shutting down.
-                return None;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn drain_receiver_empty() {
-        let (mut to, mut from): (spmc::Sender<AtomicBool>, spmc::Receiver<AtomicBool>) =
-            spmc::channel();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect zero messages to arrive.
-        assert_eq!(0, msgs.len());
-    }
-
-    #[test]
-    fn drain_receiver_nonempty() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect exactly one message with a value of "true" to arrive.
-        assert_eq!(1, msgs.len());
-        assert_eq!(true, msgs[0].load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn drain_receiver_disconnected() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        drop(to);
-
-        // Even though we sent something, if the channel has been disconnected, we don't want to
-        // process any further.
-        assert!(drain_receiver(&mut from).is_none());
-    }
-
-    #[test]
-    fn listener_start_stop() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
-        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
-
-        let running_clone = server_running.clone();
-        handle = std::thread::spawn(|| {
-            listen(listener, running_clone, |_| std::thread::spawn(|| {}))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Let "server_running" be false, causing the listener thread to join.
-        server_running.store(false, Ordering::Relaxed);
-        assert!(handle.join().unwrap().is_ok());
-    }
-
-    #[test]
-    fn listener_connect_nonblocking() {
-        let listener = TcpListener::bind("127.0.0.1:29484").unwrap();
-        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
-        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
-        let running_clone = server_running.clone();
-
-        handle = std::thread::spawn(|| {
-            listen(listener, running_clone, |_| std::thread::spawn(|| {}))
-        });
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Attempt to make a connection.
-        let tcp_stream = TcpStream::connect("127.0.0.1:29484").unwrap();
-
-        // Let "server_running" be false, causing the listener thread to join.
-        server_running.store(false, Ordering::Relaxed);
-        assert!(handle.join().unwrap().is_ok());
-    }
 }
 
 impl Servicer {
@@ -265,32 +173,22 @@ impl Servicer {
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
+        // Receive messages from the server application thread.
         let mut msg_vec = match drain_receiver(&mut self.from_application) {
-            Some(msgs) => msgs,
-            None => {
-                return Err(msg::CommError::Drop(
-                    msg::Drop::ApplicationThreadDisconnected,
-                ));
+            Ok(msgs) => msgs,
+            Err(drop) => {
+                // If the server application thread has begun shutting down, we should also shut
+                // down.
+                return Err(msg::CommError::Drop(drop));
             }
         };
+
+        // Forward any outgoing messages to the client.
         for msg in msg_vec.drain(..) {
-            let encoded_response = bincode::serialize(&msg).map_err(|err| {
-                msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
-            })?;
-            if let Err(err) = self.tcp_stream.write_all(&encoded_response) {
-                match msg::CommError::from(err) {
-                    msg::CommError::Warning(warn) => {
-                        warn!("{:?}: {:?}", self.user, warn);
-                    }
-                    msg::CommError::Drop(drop) => {
-                        error!("{:?}: {:?}", self.user, drop);
-                        return Err(msg::CommError::Drop(drop));
-                    }
-                }
-            }
+            self.send_message(msg);
         }
 
-        // Receive inputs from anyone.
+        // Receive inputs from the client.
         let mut buf = Vec::<u8>::new();
         self.tcp_stream.read(&mut buf).map_err(|err| {
             msg::CommError::from(err)
@@ -302,25 +200,18 @@ impl Servicer {
                 msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
             })?;
 
-        let response = match client_message {
-            msg::reliable::ClientMessage::ChatMessage(msg) => self.handle_chat_message(msg),
-            msg::reliable::ClientMessage::JoinRequest(cred) => Err(msg::CommError::Drop(
-                msg::Drop::AlreadyConnected,
-            )),
-            msg::reliable::ClientMessage::None => Ok(msg::reliable::ServerMessage::None),
-        }?;
+        // Handle an incoming message from the client.
+        match client_message {
+            msg::reliable::ClientMessage::ChatMessage(msg) => self.handle_chat_message(msg)?,
+            msg::reliable::ClientMessage::JoinRequest(cred) => {
+                // The user attempted to join again.
+                // TODO handle this elegantly by reconnecting them if their auth checks out,
+                // otherwise ignore.
+                return Err(msg::CommError::Drop(msg::Drop::AlreadyConnected));
+            }
+            msg::reliable::ClientMessage::None => {}
+        }
 
-        // Serialize the tick.
-        let encoded_response = bincode::serialize(&response).map_err(|err| {
-            msg::CommError::Warning(msg::Warning::FailedToSerializeAck(err))
-        })?;
-
-        // Send the tick.
-        self.tcp_stream.write_all(&encoded_response).map_err(
-            |err| {
-                msg::CommError::from(err)
-            },
-        )?;
         Ok(())
     }
 
@@ -371,10 +262,7 @@ impl Servicer {
         })
     }
 
-    fn handle_chat_message(
-        &self,
-        msg: String,
-    ) -> Result<msg::reliable::ServerMessage, msg::CommError> {
+    fn handle_chat_message(&self, msg: String) -> Result<(), msg::CommError> {
         // Send the chat message back to the application thread for broadcast.
         self.to_application
             .send(server::ServicerMessage {
@@ -386,6 +274,66 @@ impl Servicer {
             })?;
 
         // No feedback necessary.
-        Ok(msg::reliable::ServerMessage::None)
+        Ok(())
+    }
+
+    fn send_message(&mut self, msg: msg::reliable::ServerMessage) -> Result<(), msg::CommError> {
+        let encoded_response = bincode::serialize(&msg).map_err(|err| {
+            msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
+        })?;
+        if let Err(err) = self.tcp_stream.write_all(&encoded_response) {
+            match msg::CommError::from(err) {
+                msg::CommError::Warning(warn) => {
+                    warn!("{:?}: {:?}", self.user, warn);
+                }
+                msg::CommError::Drop(drop) => {
+                    error!("{:?}: {:?}", self.user, drop);
+                    return Err(msg::CommError::Drop(drop));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_start_stop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
+        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
+
+        let running_clone = server_running.clone();
+        handle = std::thread::spawn(|| {
+            listen(listener, running_clone, |_| std::thread::spawn(|| {}))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Let "server_running" be false, causing the listener thread to join.
+        server_running.store(false, Ordering::Relaxed);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn listener_connect_nonblocking() {
+        let listener = TcpListener::bind("127.0.0.1:29484").unwrap();
+        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
+        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
+        let running_clone = server_running.clone();
+
+        handle = std::thread::spawn(|| {
+            listen(listener, running_clone, |_| std::thread::spawn(|| {}))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Attempt to make a connection.
+        let tcp_stream = TcpStream::connect("127.0.0.1:29484").unwrap();
+
+        // Let "server_running" be false, causing the listener thread to join.
+        server_running.store(false, Ordering::Relaxed);
+        assert!(handle.join().unwrap().is_ok());
     }
 }
