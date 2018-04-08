@@ -7,6 +7,12 @@ use std::net::{TcpStream, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
 use std;
 
+#[derive(PartialEq)]
+enum Spin {
+    Loop,
+    Exit,
+}
+
 struct Servicer {
     tcp_stream: TcpStream,
     to_application: mpsc::Sender<msg::reliable::ServerMessage>,
@@ -20,14 +26,19 @@ impl Servicer {
         server_addr: SocketAddrV4,
         tcp_stream: TcpStream,
         to_application: mpsc::Sender<msg::reliable::ServerMessage>,
-    ) -> std::io::Result<Self> {
-        Ok(Servicer {
+    ) -> Self {
+        Servicer {
             tcp_stream: tcp_stream,
             to_application: to_application,
-        })
+        }
     }
 
     pub fn spin(&mut self) -> Result<(), msg::CommError> {
+        while self.spin_once()? == Spin::Loop {}
+        Ok(())
+    }
+
+    fn spin_once(&mut self) -> Result<Spin, msg::CommError> {
         // Receive ACK only from the connected server.
         let mut buf = Vec::<u8>::new();
         let bytes = self.tcp_stream.read(&mut buf).map_err(|err| {
@@ -37,7 +48,7 @@ impl Servicer {
         if bytes == 0 {
             // The Tcp stream has been closed.
             // Do more client management here.
-            return Ok(());
+            return Ok(Spin::Exit);
         }
 
         // Deserialize the received datagram.
@@ -49,14 +60,17 @@ impl Servicer {
 
         match server_message {
             msg::reliable::ServerMessage::JoinResponse(response) => {
-                self.handle_join_response(response)
+                self.handle_join_response(response)?;
             }
-            msg::reliable::ServerMessage::ChatMessage(chat) => self.handle_chat_message(chat),
+            msg::reliable::ServerMessage::ChatMessage(chat) => {
+                self.handle_chat_message(chat)?;
+            }
             msg::reliable::ServerMessage::LastTickReceived(tick) => {
-                self.handle_last_tick_received(tick)
+                self.handle_last_tick_received(tick)?;
             }
-            msg::reliable::ServerMessage::None => Ok(()),
         }
+
+        Ok(Spin::Loop)
     }
 
     fn handle_last_tick_received(&mut self, last_tick: usize) -> Result<(), msg::CommError> {

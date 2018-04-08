@@ -12,6 +12,26 @@ use std::sync::mpsc;
 use std;
 use super::drain_receiver;
 
+/// Represents a message from the application thread to the low latency servicer, bound for the
+/// client.
+#[derive(Clone)]
+pub struct ToClient {
+    /// The user `payload` is intended for.
+    pub to: msg::Username,
+
+    /// The payload intended for the user `to`.
+    pub payload: msg::reliable::ServerMessage,
+}
+
+impl ToClient {
+    pub fn new(to: msg::Username, payload: msg::reliable::ServerMessage) -> Self {
+        ToClient {
+            to: to,
+            payload: payload,
+        }
+    }
+}
+
 /// Services a single client using a reliable transport (Tcp). Communicates messages to the
 /// application thread via an in-process queue.
 pub struct Servicer {
@@ -25,7 +45,7 @@ pub struct Servicer {
     to_application: mpsc::Sender<server::ServicerMessage>,
 
     /// Our in-process transport from the application thread to all reliable servicers.
-    from_application: spmc::Receiver<msg::reliable::ServerMessage>,
+    from_application: spmc::Receiver<ToClient>,
 
     /// The user this servicer is servicing.
     user: msg::Username,
@@ -90,7 +110,7 @@ impl Servicer {
     pub fn listen(
         tcp_listener: TcpListener,
         to_application: mpsc::Sender<server::ServicerMessage>,
-        from_application: spmc::Receiver<msg::reliable::ServerMessage>,
+        from_application: spmc::Receiver<ToClient>,
     ) -> (std::sync::Arc<AtomicBool>, std::thread::JoinHandle<std::io::Result<()>>) {
         let server_running = std::sync::Arc::new(AtomicBool::new(true));
         let running_clone = server_running.clone();
@@ -121,7 +141,7 @@ impl Servicer {
         mut tcp_stream: TcpStream,
         server_running: std::sync::Arc<AtomicBool>,
         to_application: mpsc::Sender<server::ServicerMessage>,
-        from_application: spmc::Receiver<msg::reliable::ServerMessage>,
+        from_application: spmc::Receiver<ToClient>,
     ) -> Result<Self, msg::CommError> {
         let cred = Servicer::wait_for_join_request(&mut tcp_stream)?;
 
@@ -185,7 +205,9 @@ impl Servicer {
 
         // Forward any outgoing messages to the client.
         for msg in msg_vec.drain(..) {
-            self.send_message(msg);
+            if msg.to == self.user {
+                self.send_message(msg.payload)?;
+            }
         }
 
         // Receive inputs from the client.
@@ -209,7 +231,6 @@ impl Servicer {
                 // otherwise ignore.
                 return Err(msg::CommError::Drop(msg::Drop::AlreadyConnected));
             }
-            msg::reliable::ClientMessage::None => {}
         }
 
         Ok(())

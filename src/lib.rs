@@ -12,5 +12,5 @@ mod msg;
 
 mod bitvec;
 mod control;
-mod server;
-mod client;
+pub mod server;
+pub mod client;

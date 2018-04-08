@@ -154,9 +154,6 @@ where
             msg::low_latency::ClientMessage::ControllerInput(input) => {
                 self.handle_controller_input(src, input)
             }
-            msg::low_latency::ClientMessage::None => {
-                return Ok(());
-            }
         }?;
 
         if let Err(_) = self.to_application.send(response) {
@@ -205,7 +202,7 @@ fn parse_application_messages<StateT>(
 where
     StateT: serde::Serialize,
 {
-    let mut to_client_opt = None;
+    let mut world_state_opt = None;
     for msg in msg_vec.drain(..) {
         match msg {
             ApplicationMessage::ToClient(to_client) => {
@@ -213,9 +210,8 @@ where
                 // Since at the moment we only have a WorldState, this is trivial.
                 match to_client.payload {
                     msg::low_latency::ServerMessage::WorldState(_) => {
-                        to_client_opt = Some(to_client);
+                        world_state_opt = Some(to_client);
                     }
-                    _ => {}
                 }
             }
             ApplicationMessage::NewClient(client_data) => {
@@ -229,7 +225,7 @@ where
             }
         }
     }
-    to_client_opt
+    world_state_opt
 }
 
 fn send_message<StateT>(
@@ -275,8 +271,8 @@ mod tests {
             }),
         ];
         let mut address_user = bidir_map::BidirMap::new();
-        let to_client_opt = parse_application_messages(msg_vec, &mut address_user);
-        assert!(to_client_opt.is_some());
+        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
+        assert!(world_state_opt.is_some());
         assert!(!address_user.is_empty());
     }
 
@@ -294,10 +290,10 @@ mod tests {
             )),
         ];
         let mut address_user = bidir_map::BidirMap::new();
-        let to_client_opt = parse_application_messages(msg_vec, &mut address_user);
+        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
         assert_eq!(
             msg::low_latency::ServerMessage::WorldState(54321),
-            to_client_opt.unwrap().payload
+            world_state_opt.unwrap().payload
         );
     }
 
@@ -313,8 +309,8 @@ mod tests {
                 ApplicationMessage::ClientDisconnect(msg::Username(String::from("client_data"))),
             ];
         let mut address_user = bidir_map::BidirMap::new();
-        let to_client_opt = parse_application_messages(msg_vec, &mut address_user);
-        assert!(to_client_opt.is_none());
+        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
+        assert!(world_state_opt.is_none());
         assert!(address_user.is_empty());
     }
 

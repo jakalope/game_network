@@ -16,6 +16,4 @@ pub enum ServicerMessage<StateT> {
     WorldState(StateT),
     /// A message that will be visible to all players.
     ChatMessage(msg::reliable::ChatMessage),
-    /// Implies there is no message to send.
-    None,
 }

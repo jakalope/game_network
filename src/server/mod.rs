@@ -22,8 +22,6 @@ pub enum ServicerPayload {
     ControllerSequence(control::ControllerSequence),
     ///
     ClientData(msg::ClientData),
-    /// Implies there is no message to send.
-    None,
 }
 
 /// Represents messages passed from client servicer threads to the main application thread, along
@@ -45,7 +43,8 @@ where
     reliable_join_handle: std::thread::JoinHandle<()>,
     from_servicer: mpsc::Receiver<ServicerMessage>,
     to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage<StateT>>,
-    to_reliable_servicer: spmc::Sender<msg::reliable::ServerMessage>,
+    // TODO consider making a reliable::ApplicationMessage
+    to_reliable_servicer: spmc::Sender<reliable::ToClient>,
 }
 
 impl<StateT> Server<StateT>
@@ -74,6 +73,14 @@ where
             to_low_latency_servicer: to_low_latency_servicer,
             to_reliable_servicer: to_reliable_servicer,
         }
+    }
+
+    pub fn send_low_latency(&mut self, msg: low_latency::ApplicationMessage<StateT>) {
+        self.to_low_latency_servicer.send(msg);
+    }
+
+    pub fn send_reliable(&mut self, msg: reliable::ToClient) {
+        self.to_reliable_servicer.send(msg);
     }
 
     pub fn quit(mut self) -> std::thread::Result<()> {

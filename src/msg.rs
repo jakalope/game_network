@@ -101,8 +101,6 @@ pub mod reliable {
         ChatMessage(String),
         /// Request to join the server with the given user's `Credentials`.
         JoinRequest(super::Credentials),
-        /// Implies there is no message to send.
-        None,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -118,8 +116,6 @@ pub mod reliable {
         ChatMessage(ChatMessage),
         /// World tick number for the latest client controller input received.
         LastTickReceived(usize),
-        /// Implies there is no message to send.
-        None,
     }
 }
 
@@ -132,8 +128,6 @@ pub mod low_latency {
         /// A compressed series of control inputs -- one for each game tick since the last tick
         /// received.
         ControllerInput(control::CompressedControllerSequence),
-        /// Implies there is no message to send.
-        None,
     }
 
     /// Represents messages passed from the server to a client over a low-latency (Udp) transport.
@@ -144,8 +138,6 @@ pub mod low_latency {
     {
         /// The latest segment of world state needed by a specific client.
         WorldState(StateT),
-        /// Implies there is no message to send.
-        None,
     }
 }
 

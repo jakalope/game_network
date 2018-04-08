@@ -49,14 +49,13 @@ where
         StateT: serde::Serialize,
     {
         loop {
-            // Receive ACK only from the connected server.
+            // Receive only from the connected server.
             let mut buf = Vec::<u8>::new();
             self.udp_socket.recv(&mut buf).map_err(|err| {
                 msg::CommError::from(err)
             })?;
 
             // Deserialize the received datagram.
-            // The ACK contains the latest controller input the server has received from us.
             let server_message: msg::low_latency::ServerMessage<StateT> =
                 bincode::deserialize(&buf[..]).map_err(|err| {
                     msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
@@ -64,9 +63,10 @@ where
 
             match server_message {
                 msg::low_latency::ServerMessage::WorldState(state) => {
+                    // The message contains the latest controller input the server has received
+                    // from us.
                     self.handle_world_state(state)?;
                 }
-                msg::low_latency::ServerMessage::None => {}
             }
         }
     }
@@ -83,6 +83,7 @@ where
             })
     }
 
+    // TODO Do we want/need a from_application for this?
     pub fn send_controller_inputs(&self) -> Result<(), msg::CommError> {
         if !self.controller_seq.is_empty() {
             let payload = self.controller_seq.to_compressed().ok_or(
