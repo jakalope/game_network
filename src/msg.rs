@@ -37,6 +37,7 @@ pub enum Warning {
     FailedToSerialize(Box<bincode::ErrorKind>),
     FailedToSerializeAck(Box<bincode::ErrorKind>),
     WrongMessageType,
+    UnknownSource(std::net::SocketAddr),
 }
 
 /// When a CommError is of this type, a servicer will drop a client.
@@ -48,37 +49,36 @@ pub enum Drop {
     FailedToBind(std::io::Error),
     FailedToConnect(std::io::Error),
     IoFailure(std::io::Error),
-    UnknownSource(std::net::SocketAddr),
 }
-
 
 #[derive(Debug)]
 pub enum CommError {
     Warning(Warning),
     Drop(Drop),
+    Exit,
 }
 
 impl From<std::io::Error> for CommError {
     fn from(err: std::io::Error) -> CommError {
         match err.kind() {
             std::io::ErrorKind::NotFound => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::ConnectionReset => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::WouldBlock => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::InvalidInput => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::InvalidData => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::WriteZero => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::Interrupted => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::Other => CommError::Warning(Warning::IoFailure(err)),
+            std::io::ErrorKind::UnexpectedEof => CommError::Warning(Warning::IoFailure(err)),
             std::io::ErrorKind::PermissionDenied => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::ConnectionRefused => CommError::Drop(Drop::IoFailure(err)),
-            std::io::ErrorKind::ConnectionReset => CommError::Warning(Warning::IoFailure(err)),
             std::io::ErrorKind::ConnectionAborted => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::NotConnected => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::AddrInUse => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::AddrNotAvailable => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::BrokenPipe => CommError::Drop(Drop::IoFailure(err)),
             std::io::ErrorKind::AlreadyExists => CommError::Drop(Drop::IoFailure(err)),
-            std::io::ErrorKind::WouldBlock => CommError::Warning(Warning::IoFailure(err)),
-            std::io::ErrorKind::InvalidInput => CommError::Warning(Warning::IoFailure(err)),
-            std::io::ErrorKind::InvalidData => CommError::Warning(Warning::IoFailure(err)),
             std::io::ErrorKind::TimedOut => CommError::Drop(Drop::IoFailure(err)),
-            std::io::ErrorKind::WriteZero => CommError::Warning(Warning::IoFailure(err)),
-            std::io::ErrorKind::Interrupted => CommError::Warning(Warning::IoFailure(err)),
-            std::io::ErrorKind::Other => CommError::Warning(Warning::IoFailure(err)),
-            std::io::ErrorKind::UnexpectedEof => CommError::Warning(Warning::IoFailure(err)),
             _ => CommError::Drop(Drop::IoFailure(err)),
         }
     }
@@ -145,7 +145,8 @@ macro_rules! comm_log {
     ($x:expr) => (
         match $x {
             msg::CommError::Warning(warn) => { warn!("{:?}", warn); },
-            msg::CommError::Drop(drop) => { error!("{:?}", drop); },
+            msg::CommError::Drop(drop) => { warn!("{:?}", drop); },
+            msg::CommError::Exit => { error!("Exit"); },
         });
 }
 

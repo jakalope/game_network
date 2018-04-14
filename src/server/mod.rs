@@ -20,11 +20,11 @@ pub enum ServicerPayload {
     ChatMessage(String),
     /// A series of control inputs -- one for each game tick since the last tick received.
     ControllerSequence(control::ControllerSequence),
-    ///
+    /// Used to authenticate a user.
     ClientData(msg::ClientData),
 }
 
-/// Represents messages passed from client servicer threads to the main application thread, along
+/// Represents messages passed from servicer threads to the main application thread, along
 /// with the user the message originated from over the network.
 #[derive(Clone)]
 pub struct ServicerMessage {
@@ -43,8 +43,7 @@ where
     reliable_join_handle: std::thread::JoinHandle<()>,
     from_servicer: mpsc::Receiver<ServicerMessage>,
     to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage<StateT>>,
-    // TODO consider making a reliable::ApplicationMessage
-    to_reliable_servicer: spmc::Sender<reliable::ToClient>,
+    to_reliable_servicer: spmc::Sender<reliable::ApplicationMessage>,
 }
 
 impl<StateT> Server<StateT>
@@ -79,7 +78,7 @@ where
         self.to_low_latency_servicer.send(msg);
     }
 
-    pub fn send_reliable(&mut self, msg: reliable::ToClient) {
+    pub fn send_reliable(&mut self, msg: reliable::ApplicationMessage) {
         self.to_reliable_servicer.send(msg);
     }
 

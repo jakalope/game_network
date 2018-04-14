@@ -32,6 +32,10 @@ impl ToClient {
     }
 }
 
+pub enum ApplicationMessage {
+    ToClient(ToClient),
+}
+
 /// Services a single client using a reliable transport (Tcp). Communicates messages to the
 /// application thread via an in-process queue.
 pub struct Servicer {
@@ -45,7 +49,7 @@ pub struct Servicer {
     to_application: mpsc::Sender<server::ServicerMessage>,
 
     /// Our in-process transport from the application thread to all reliable servicers.
-    from_application: spmc::Receiver<ToClient>,
+    from_application: spmc::Receiver<ApplicationMessage>,
 
     /// The user this servicer is servicing.
     user: msg::Username,
@@ -69,8 +73,6 @@ where
     for stream in tcp_listener.incoming() {
         match stream {
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // wait until network socket is ready, typically implemented
-                // via platform-specific APIs such as epoll or IOCP
                 error!("TcpListener would block. Sleeping for one second.");
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
@@ -110,7 +112,7 @@ impl Servicer {
     pub fn listen(
         tcp_listener: TcpListener,
         to_application: mpsc::Sender<server::ServicerMessage>,
-        from_application: spmc::Receiver<ToClient>,
+        from_application: spmc::Receiver<ApplicationMessage>,
     ) -> (std::sync::Arc<AtomicBool>, std::thread::JoinHandle<std::io::Result<()>>) {
         let server_running = std::sync::Arc::new(AtomicBool::new(true));
         let running_clone = server_running.clone();
@@ -141,7 +143,7 @@ impl Servicer {
         mut tcp_stream: TcpStream,
         server_running: std::sync::Arc<AtomicBool>,
         to_application: mpsc::Sender<server::ServicerMessage>,
-        from_application: spmc::Receiver<ToClient>,
+        from_application: spmc::Receiver<ApplicationMessage>,
     ) -> Result<Self, msg::CommError> {
         let cred = Servicer::wait_for_join_request(&mut tcp_stream)?;
 
@@ -180,7 +182,9 @@ impl Servicer {
                             warn!("Warning {:?}: {:?}", self.user, warn);
                         }
                         msg::CommError::Drop(drop) => {
-                            error!("Dropping {:?}: {:?}", self.user, drop);
+                            warn!("Dropping {:?}: {:?}", self.user, drop);
+                        }
+                        msg::CommError::Exit => {
                             self.shutdown();
                         }
                     }
@@ -205,8 +209,9 @@ impl Servicer {
 
         // Forward any outgoing messages to the client.
         for msg in msg_vec.drain(..) {
-            if msg.to == self.user {
-                self.send_message(msg.payload)?;
+            let ApplicationMessage::ToClient(to_client) = msg;
+            if to_client.to == self.user {
+                self.send_message(to_client.payload)?;
             }
         }
 
@@ -269,6 +274,9 @@ impl Servicer {
                         msg::CommError::Warning(warn) => {
                             comm_log!(msg::CommError::Warning(warn));
                         }
+                        msg::CommError::Exit => {
+                            return Err(msg::CommError::Exit);
+                        }
                     }
                 }
             };
@@ -308,8 +316,11 @@ impl Servicer {
                     warn!("{:?}: {:?}", self.user, warn);
                 }
                 msg::CommError::Drop(drop) => {
-                    error!("{:?}: {:?}", self.user, drop);
+                    warn!("{:?}: {:?}", self.user, drop);
                     return Err(msg::CommError::Drop(drop));
+                }
+                msg::CommError::Exit => {
+                    return Err(msg::CommError::Exit);
                 }
             }
         }

@@ -57,6 +57,10 @@ where
 
 /// Services all clients using a low-latency transport (Udp). Communicates messages to the
 /// application thread via an in-process queue.
+///
+/// Drop errors on the low latency servicer has different semantics than on the reliable
+/// side. Since the low latency servicer handles all clients, Drop means "drop this particular
+/// client and propagate this fact to all other threads".
 pub struct Servicer<StateT>
 where
     StateT: serde::Serialize,
@@ -99,26 +103,25 @@ where
     }
 
     pub fn spin(&mut self) {
-        // Initialize.
         if let Err(err) = self.udp_socket.set_nonblocking(true) {
             error!("{:?}", err);
-            self.shutdown();
-            return;
-        }
-        // Loop till we shutdown.
-        loop {
-            match self.spin_once() {
-                Ok(()) => {}
-                Err(msg::CommError::Drop(drop)) => {
-                    error!("{:?}", drop);
-                    self.shutdown();
-                    return;
-                }
-                Err(msg::CommError::Warning(warn)) => {
-                    warn!("{:?}", warn);
+        } else {
+            loop {
+                match self.spin_once() {
+                    Ok(()) => {}
+                    Err(msg::CommError::Drop(drop)) => {
+                        warn!("Drop: {:?}", drop);
+                    }
+                    Err(msg::CommError::Warning(warn)) => {
+                        warn!("Warn: {:?}", warn);
+                    }
+                    Err(msg::CommError::Exit) => {
+                        break;
+                    }
                 }
             }
         }
+        info!("Exiting low latency servicer thread.");
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
@@ -128,7 +131,7 @@ where
                 to_client = parse_application_messages(msg_vec, &mut self.address_user);
             }
             Err(drop) => {
-                return Err(msg::CommError::Drop(drop));
+                return Err(msg::CommError::Exit);
             }
         }
         if let Some(msg) = to_client {
@@ -140,7 +143,7 @@ where
         match self.udp_socket.recv_from(&mut buf) {
             Ok((_, src)) => self.process_udp(src, &buf),
             Err(err) => Err(msg::CommError::Warning(msg::Warning::IoFailure(err))),
-        } // match
+        }
     }
 
     fn process_udp(&mut self, src: std::net::SocketAddr, buf: &[u8]) -> Result<(), msg::CommError> {
@@ -156,15 +159,12 @@ where
             }
         }?;
 
-        if let Err(_) = self.to_application.send(response) {
+        self.to_application.send(response).map_err(
             // Application thread closed the in-process connection, so we should exit gracefully.
-            self.shutdown();
-        }
-        Ok(())
-    }
+            |_| msg::CommError::Exit,
+        )?;
 
-    fn shutdown(&mut self) {
-        self.shutting_down = true;
+        Ok(())
     }
 
     fn handle_controller_input(
@@ -172,11 +172,9 @@ where
         src: std::net::SocketAddr,
         input: control::CompressedControllerSequence,
     ) -> Result<server::ServicerMessage, msg::CommError> {
-        // Lookup the username given the source socket address.
+        // Lookup the user given the source socket address.
         let user = self.address_user.get_by_first(&src).ok_or(
-            msg::CommError::Drop(
-                msg::Drop::UnknownSource(src),
-            ),
+            msg::CommError::Warning(msg::Warning::UnknownSource(src)),
         )?;
 
         // Decompress the deserialized controller input sequence.

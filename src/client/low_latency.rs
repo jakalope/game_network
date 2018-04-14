@@ -3,6 +3,7 @@ use client;
 use control;
 use msg;
 use serde;
+use spmc;
 use std::io::Read;
 use std::net::{TcpStream, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
@@ -20,6 +21,7 @@ where
     self_addr: SocketAddrV4,
     controller_seq: control::ControllerSequence,
     to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
+    // from_application: spmc::Receiver<client::ApplicationMessage<StateT>>,
 }
 
 impl<StateT> Servicer<StateT>
@@ -31,6 +33,7 @@ where
         self_addr: SocketAddrV4,
         server_addr: SocketAddrV4,
         to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
+        // from_application: spmc::Receiver<client::ApplicationMessage<StateT>>,
     ) -> std::io::Result<Self> {
         let udp_socket = UdpSocket::bind(&self_addr)?;
         udp_socket.connect(&server_addr)?;
@@ -40,33 +43,55 @@ where
             self_addr: self_addr,
             controller_seq: control::ControllerSequence::new(),
             to_application: to_application,
+            // from_application: from_application,
         })
     }
 
-    pub fn spin(&mut self) -> Result<(), msg::CommError>
+    pub fn spin(&mut self)
     where
         StateT: serde::de::DeserializeOwned,
         StateT: serde::Serialize,
     {
         loop {
-            // Receive only from the connected server.
-            let mut buf = Vec::<u8>::new();
-            self.udp_socket.recv(&mut buf).map_err(|err| {
-                msg::CommError::from(err)
+            match self.spin_once() {
+                Ok(()) => {}
+                Err(msg::CommError::Warning(warn)) => {
+                    warn!("Warning: {:?}", warn);
+                }
+                Err(msg::CommError::Drop(drop)) => {
+                    warn!("Dropping: {:?}", drop);
+                    break;
+                }
+                Err(msg::CommError::Exit) => {
+                    break;
+                }
+            }
+        }
+        info!("Exiting client low latency servicer");
+    }
+
+    fn spin_once(&mut self) -> Result<(), msg::CommError>
+    where
+        StateT: serde::de::DeserializeOwned,
+        StateT: serde::Serialize,
+    {
+        // Receive only from the connected server.
+        let mut buf = Vec::<u8>::new();
+        self.udp_socket.recv(&mut buf).map_err(|err| {
+            msg::CommError::from(err)
+        })?;
+
+        // Deserialize the received datagram.
+        let server_message: msg::low_latency::ServerMessage<StateT> =
+            bincode::deserialize(&buf[..]).map_err(|err| {
+                msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
             })?;
 
-            // Deserialize the received datagram.
-            let server_message: msg::low_latency::ServerMessage<StateT> =
-                bincode::deserialize(&buf[..]).map_err(|err| {
-                    msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
-                })?;
-
-            match server_message {
-                msg::low_latency::ServerMessage::WorldState(state) => {
-                    // The message contains the latest controller input the server has received
-                    // from us.
-                    self.handle_world_state(state)?;
-                }
+        match server_message {
+            msg::low_latency::ServerMessage::WorldState(state) => {
+                // The message contains the latest controller input the server has received
+                // from us.
+                self.handle_world_state(state)
             }
         }
     }
