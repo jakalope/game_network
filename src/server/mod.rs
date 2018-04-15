@@ -39,8 +39,9 @@ where
     StateT: serde::Serialize,
     StateT: Send,
 {
+    listener_kill_switch: std::sync::Arc<AtomicBool>,
+    listener_join_handle: std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
     low_latency_servicer: low_latency::Servicer<StateT>,
-    reliable_join_handle: std::thread::JoinHandle<()>,
     from_servicer: mpsc::Receiver<ServicerMessage>,
     to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage<StateT>>,
     to_reliable_servicer: spmc::Sender<reliable::ApplicationMessage>,
@@ -52,22 +53,24 @@ where
     StateT: Send,
 {
     pub fn new(udp_socket: UdpSocket, tcp_listener: TcpListener) -> Self {
-        let (to_reliable_servicer, re_from_application) = spmc::channel();
         let (to_application, from_servicer) = mpsc::channel();
+        let (to_reliable_servicer, re_from_application) = spmc::channel();
         let (to_low_latency_servicer, ll_from_application) = spmc::channel();
-        let low_latency_servicer = low_latency::Servicer::<StateT>::new(
-            udp_socket,
+
+        let (listener_kill_switch, listener_join_handle) = reliable::Servicer::listen(
+            tcp_listener,
             to_application.clone(),
-            ll_from_application,
+            re_from_application,
+            udp_socket.local_addr().unwrap().port(),
         );
 
-        let reliable_join_handle = std::thread::spawn(move || {
-            reliable::Servicer::listen(tcp_listener, to_application, re_from_application);
-        });
+        let low_latency_servicer =
+            low_latency::Servicer::new(udp_socket, to_application, ll_from_application);
 
         Server {
+            listener_kill_switch: listener_kill_switch,
+            listener_join_handle: listener_join_handle,
             low_latency_servicer: low_latency_servicer,
-            reliable_join_handle: reliable_join_handle,
             from_servicer: from_servicer,
             to_low_latency_servicer: to_low_latency_servicer,
             to_reliable_servicer: to_reliable_servicer,
@@ -82,12 +85,15 @@ where
         self.to_reliable_servicer.send(msg);
     }
 
-    pub fn quit(mut self) -> std::thread::Result<()> {
+    pub fn quit(mut self) {
+        // Tell the TCP listener to shut down, then join.
+        self.listener_kill_switch.store(false, Ordering::Relaxed);
+        self.listener_join_handle.join();
+
         // Disconnect servicer message queues. This informs the servicers to disconnect from their
         // sockets and join their parent thread.
         drop(self.to_low_latency_servicer);
         drop(self.to_reliable_servicer);
-        self.reliable_join_handle.join()
     }
 }
 

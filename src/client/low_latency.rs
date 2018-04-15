@@ -11,7 +11,7 @@ use std;
 
 /// Services a client using a low-latency transport (Udp). Communicates messages to the
 /// application thread via an in-process queue.
-struct Servicer<StateT>
+pub struct Servicer<StateT>
 where
     StateT: serde::Serialize,
     StateT: Send,
@@ -29,7 +29,7 @@ where
     StateT: serde::Serialize,
     StateT: Send,
 {
-    fn new(
+    pub fn connect(
         self_addr: SocketAddrV4,
         server_addr: SocketAddrV4,
         to_application: mpsc::Sender<client::ServicerMessage<StateT>>,

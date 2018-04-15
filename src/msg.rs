@@ -45,6 +45,7 @@ pub enum Warning {
 pub enum Drop {
     AlreadyConnected,
     ApplicationThreadDisconnected,
+    ServicerThreadDisconnected,
     FailedToAuthenticate(Credentials),
     FailedToBind(std::io::Error),
     FailedToConnect(std::io::Error),
@@ -85,12 +86,14 @@ impl From<std::io::Error> for CommError {
 }
 
 pub mod reliable {
+    use super::*;
+
     /// A server's response to a `ClientMessage::JoinRequest`. If a `JoinRequest` was rejected, a
     /// reason will be provided. Otherwise, a simple `Confirmation` is sent before world states begin
     /// streaming.
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub enum JoinResponse {
-        Confirmation,
+        Confirmation(u16),
         AuthenticationError,
     }
 

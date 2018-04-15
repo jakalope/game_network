@@ -2,75 +2,73 @@ use bincode;
 use control;
 use msg;
 use serde;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{TcpStream, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
 use std;
 
-#[derive(PartialEq)]
-enum Spin {
-    Loop,
-    Exit,
+fn receive_server_message(
+    tcp_stream: &mut TcpStream,
+) -> Result<msg::reliable::ServerMessage, msg::CommError> {
+    // Receive ACK only from the connected server.
+    let mut buf = Vec::<u8>::new();
+    let bytes = tcp_stream.read(&mut buf).map_err(
+        |err| msg::CommError::from(err),
+    )?;
+
+    if bytes == 0 {
+        // The Tcp stream has been closed.
+        return Err(msg::CommError::Exit);
+    }
+
+    // Deserialize the received datagram.
+    bincode::deserialize(&buf[..]).map_err(|err| {
+        msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
+    })
 }
 
-struct Servicer {
+pub struct Servicer {
     tcp_stream: TcpStream,
     to_application: mpsc::Sender<msg::reliable::ServerMessage>,
 }
 
 impl Servicer {
-    // let mut tcp_stream = TcpStream::connect(&server_addr)?;
-    // let (to_application, from_application) = mpsc::channel();
-    pub fn new(
-        self_addr: SocketAddrV4,
+    pub fn connect(
+        cred: msg::Credentials,
         server_addr: SocketAddrV4,
-        tcp_stream: TcpStream,
+        mut tcp_stream: TcpStream,
         to_application: mpsc::Sender<msg::reliable::ServerMessage>,
-    ) -> Self {
-        Servicer {
-            tcp_stream: tcp_stream,
-            to_application: to_application,
-        }
-    }
+    ) -> Result<Self, msg::CommError> {
 
-    pub fn spin(&mut self) -> Result<(), msg::CommError> {
-        while self.spin_once()? == Spin::Loop {}
-        Ok(())
-    }
-
-    fn spin_once(&mut self) -> Result<Spin, msg::CommError> {
-        // Receive ACK only from the connected server.
-        let mut buf = Vec::<u8>::new();
-        let bytes = self.tcp_stream.read(&mut buf).map_err(|err| {
+        let request = msg::reliable::ClientMessage::JoinRequest(cred);
+        let encoded_request: Vec<u8> = bincode::serialize(&request).map_err(|err| {
+            msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
+        })?;
+        tcp_stream.write(&encoded_request).map_err(|err| {
             msg::CommError::from(err)
         })?;
 
-        if bytes == 0 {
-            // The Tcp stream has been closed.
-            // Do more client management here.
-            return Ok(Spin::Exit);
-        }
+        Ok(Servicer {
+            tcp_stream: tcp_stream,
+            to_application: to_application,
+        })
+    }
 
-        // Deserialize the received datagram.
-        // The ACK contains the latest controller input the server has received from us.
-        let server_message: msg::reliable::ServerMessage =
-            bincode::deserialize(&buf[..]).map_err(|err| {
-                msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
-            })?;
+    pub fn spin(&mut self) -> Result<(), msg::CommError> {
+        while let Ok(_) = self.spin_once() {}
+        Ok(())
+    }
 
-        match server_message {
+    fn spin_once(&mut self) -> Result<(), msg::CommError> {
+        match receive_server_message(&mut self.tcp_stream)? {
             msg::reliable::ServerMessage::JoinResponse(response) => {
-                self.handle_join_response(response)?;
+                self.handle_join_response(response)
             }
-            msg::reliable::ServerMessage::ChatMessage(chat) => {
-                self.handle_chat_message(chat)?;
-            }
+            msg::reliable::ServerMessage::ChatMessage(chat) => self.handle_chat_message(chat),
             msg::reliable::ServerMessage::LastTickReceived(tick) => {
-                self.handle_last_tick_received(tick)?;
+                self.handle_last_tick_received(tick)
             }
         }
-
-        Ok(Spin::Loop)
     }
 
     fn handle_last_tick_received(&mut self, last_tick: usize) -> Result<(), msg::CommError> {

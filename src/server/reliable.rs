@@ -113,10 +113,11 @@ impl Servicer {
         tcp_listener: TcpListener,
         to_application: mpsc::Sender<server::ServicerMessage>,
         from_application: spmc::Receiver<ApplicationMessage>,
+        udp_port: u16,
     ) -> (std::sync::Arc<AtomicBool>, std::thread::JoinHandle<std::io::Result<()>>) {
         let server_running = std::sync::Arc::new(AtomicBool::new(true));
         let running_clone = server_running.clone();
-        let join_handle = std::thread::spawn(|| {
+        let join_handle = std::thread::spawn(move || {
             listen(tcp_listener, running_clone.clone(), move |stream| {
                 let to_app = to_application.clone();
                 let from_app = from_application.clone();
@@ -126,6 +127,7 @@ impl Servicer {
                     server_running,
                     to_app,
                     from_app,
+                    udp_port,
                 ) {
                     Ok(mut servicer) => {
                         servicer.spin();
@@ -144,11 +146,23 @@ impl Servicer {
         server_running: std::sync::Arc<AtomicBool>,
         to_application: mpsc::Sender<server::ServicerMessage>,
         from_application: spmc::Receiver<ApplicationMessage>,
+        udp_port: u16,
     ) -> Result<Self, msg::CommError> {
         let cred = Servicer::wait_for_join_request(&mut tcp_stream)?;
 
         // Authenticate the user.
         let mut client_data = Servicer::authenticate_user(cred)?;
+
+        // Send back this server's UDP address.
+        let join_response = msg::reliable::ServerMessage::JoinResponse(
+            msg::reliable::JoinResponse::Confirmation(udp_port),
+        );
+        let encoded_response = bincode::serialize(&join_response).map_err(|err| {
+            msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
+        })?;
+        tcp_stream.write(&encoded_response).map_err(|err| {
+            msg::CommError::from(err)
+        })?;
 
         // Make the servicer.
         let mut servicer = Servicer {
