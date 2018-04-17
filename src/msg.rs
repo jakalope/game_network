@@ -2,7 +2,7 @@ use bincode;
 use control;
 use serde;
 use std;
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Hash, Eq)]
 pub struct Username(pub String);
@@ -15,7 +15,7 @@ pub struct ClientData {
 
     /// Client's socket address for low-latency transport. This is where the server will send
     /// low-latency data for this client.
-    pub udp_addr: SocketAddrV4,
+    pub udp_addr: SocketAddr,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
@@ -24,7 +24,7 @@ pub struct Credentials {
     pub password: String,
 
     /// When requesting to join the server via Tcp, the client must supply an open Udp port.
-    pub udp_addr: SocketAddrV4,
+    pub udp_port: u16,
 }
 
 

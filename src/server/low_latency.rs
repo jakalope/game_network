@@ -213,10 +213,7 @@ where
                 }
             }
             ApplicationMessage::NewClient(client_data) => {
-                address_user.insert(
-                    std::net::SocketAddr::V4(client_data.udp_addr),
-                    client_data.username,
-                );
+                address_user.insert(client_data.udp_addr, client_data.username);
             }
             ApplicationMessage::ClientDisconnect(user) => {
                 address_user.remove_by_second(&user);

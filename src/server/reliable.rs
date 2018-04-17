@@ -146,16 +146,19 @@ impl Servicer {
         server_running: std::sync::Arc<AtomicBool>,
         to_application: mpsc::Sender<server::ServicerMessage>,
         from_application: spmc::Receiver<ApplicationMessage>,
-        udp_port: u16,
+        server_udp_port: u16,
     ) -> Result<Self, msg::CommError> {
+        let client_tcp_address = tcp_stream.peer_addr().map_err(
+            |err| msg::CommError::from(err),
+        )?;
         let cred = Servicer::wait_for_join_request(&mut tcp_stream)?;
 
         // Authenticate the user.
-        let mut client_data = Servicer::authenticate_user(cred)?;
+        let mut client_data = Servicer::authenticate_user(client_tcp_address, cred)?;
 
         // Send back this server's UDP address.
         let join_response = msg::reliable::ServerMessage::JoinResponse(
-            msg::reliable::JoinResponse::Confirmation(udp_port),
+            msg::reliable::JoinResponse::Confirmation(server_udp_port),
         );
         let encoded_response = bincode::serialize(&join_response).map_err(|err| {
             msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
@@ -297,11 +300,15 @@ impl Servicer {
         }
     }
 
-    fn authenticate_user(cred: msg::Credentials) -> Result<msg::ClientData, msg::CommError> {
+    fn authenticate_user(
+        mut client_address: std::net::SocketAddr,
+        cred: msg::Credentials,
+    ) -> Result<msg::ClientData, msg::CommError> {
         // TODO
+        client_address.set_port(cred.udp_port);
         Ok(msg::ClientData {
             username: cred.username,
-            udp_addr: cred.udp_addr,
+            udp_addr: client_address,
         })
     }
 

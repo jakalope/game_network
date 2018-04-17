@@ -30,6 +30,7 @@ fn receive_server_message(
 pub struct Servicer {
     tcp_stream: TcpStream,
     to_application: mpsc::Sender<msg::reliable::ServerMessage>,
+    server_udp_port: Option<u16>,
 }
 
 impl Servicer {
@@ -48,10 +49,24 @@ impl Servicer {
             msg::CommError::from(err)
         })?;
 
-        Ok(Servicer {
+        let mut servicer = Servicer {
             tcp_stream: tcp_stream,
             to_application: to_application,
-        })
+            server_udp_port: None,
+        };
+
+        loop {
+            match servicer.spin_once() {
+                Ok(()) => { if let Some(_) = servicer.server_udp_port() { return Ok(servicer);} }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    pub fn server_udp_port(&self) -> Option<u16> {
+        return self.server_udp_port;
     }
 
     pub fn spin(&mut self) -> Result<(), msg::CommError> {
@@ -84,10 +99,18 @@ impl Servicer {
     }
 
     fn handle_join_response(
-        &self,
+        &mut self,
         response: msg::reliable::JoinResponse,
     ) -> Result<(), msg::CommError> {
-        Ok(())
+        match response {
+            msg::reliable::JoinResponse::Confirmation(port) => {
+                self.server_udp_port = Some(port);
+                return Ok(());
+            }
+            msg::reliable::JoinResponse::AuthenticationError => {
+                return Err(msg::CommError::Exit);
+            }
+        }
     }
 
     fn handle_chat_message(

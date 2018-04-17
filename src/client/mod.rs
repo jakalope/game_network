@@ -42,15 +42,9 @@ where
         let reliable_servicer =
             reliable::Servicer::connect(cred, server_addr.clone(), tcp_stream, re_to_application)?;
 
-        // Wait for a server UDP port.
-        loop {
-            let msg = from_re_servicer.recv().map_err(|_| {
-                msg::CommError::Drop(msg::Drop::ServicerThreadDisconnected)
-            })?;
-            // match msg {
-            // }
-            // server_addr.set_port(udp_port);
-        }
+        // The result is expected to be present after connect() returns in success.
+        let server_udp_port = reliable_servicer.server_udp_port().unwrap();
+        server_addr.set_port(server_udp_port);
 
         let self_addr = "127.0.0.1:0".parse().unwrap();
         let (ll_to_application, from_ll_servicer) = mpsc::channel();
