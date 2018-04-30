@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn listener_start_stop() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
-        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
+        let handle: std::thread::JoinHandle<std::io::Result<()>>;
+        let server_running = std::sync::Arc::new(AtomicBool::new(true));
 
         let running_clone = server_running.clone();
         handle = std::thread::spawn(|| {
@@ -373,8 +373,8 @@ mod tests {
     #[test]
     fn listener_connect_nonblocking() {
         let listener = TcpListener::bind("127.0.0.1:29484").unwrap();
-        let mut handle: std::thread::JoinHandle<std::io::Result<()>>;
-        let mut server_running = std::sync::Arc::new(AtomicBool::new(true));
+        let handle: std::thread::JoinHandle<std::io::Result<()>>;
+        let server_running = std::sync::Arc::new(AtomicBool::new(true));
         let running_clone = server_running.clone();
 
         handle = std::thread::spawn(|| {

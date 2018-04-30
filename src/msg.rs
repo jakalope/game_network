@@ -1,6 +1,8 @@
 use bincode;
+use bitvec;
 use control;
 use serde;
+use serde_bytes;
 use std;
 use std::net::SocketAddr;
 
@@ -117,8 +119,6 @@ pub mod reliable {
     pub enum ServerMessage {
         JoinResponse(JoinResponse),
         ChatMessage(ChatMessage),
-        /// World tick number for the latest client controller input received.
-        LastTickReceived(usize),
     }
 }
 
@@ -135,12 +135,13 @@ pub mod low_latency {
 
     /// Represents messages passed from the server to a client over a low-latency (Udp) transport.
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-    pub enum ServerMessage<StateT>
-    where
-        StateT: serde::Serialize,
-    {
-        /// The latest segment of world state needed by a specific client.
-        WorldState(StateT),
+    pub enum ServerMessage {
+        /// The latest segment of world state needed by a specific client. This is just a byte
+        /// vector, which gives us type erasure, to avoid implementation complexity for now.
+        #[serde(with = "serde_bytes")]
+        WorldState(Vec<u8>),
+        /// World tick number for the latest client controller input received.
+        LastTickReceived(usize),
     }
 }
 

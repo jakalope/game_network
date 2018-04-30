@@ -12,6 +12,7 @@ use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std;
+use super::drain_receiver;
 
 /// Represents messages passed from client servicer threads to the main application thread.
 #[derive(Clone)]
@@ -34,24 +35,16 @@ pub struct ServicerMessage {
     pub payload: ServicerPayload,
 }
 
-pub struct Server<StateT>
-where
-    StateT: serde::Serialize,
-    StateT: Send,
-{
+pub struct Server {
     listener_kill_switch: std::sync::Arc<AtomicBool>,
     listener_join_handle: std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
-    low_latency_servicer: low_latency::Servicer<StateT>,
+    low_latency_servicer: low_latency::Servicer,
     from_servicer: mpsc::Receiver<ServicerMessage>,
-    to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage<StateT>>,
+    to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage>,
     to_reliable_servicer: spmc::Sender<reliable::ApplicationMessage>,
 }
 
-impl<StateT> Server<StateT>
-where
-    StateT: serde::Serialize,
-    StateT: Send,
-{
+impl Server {
     pub fn new(udp_socket: UdpSocket, tcp_listener: TcpListener) -> Self {
         let (to_application, from_servicer) = mpsc::channel();
         let (to_reliable_servicer, re_from_application) = spmc::channel();
@@ -77,12 +70,16 @@ where
         }
     }
 
-    pub fn send_low_latency(&mut self, msg: low_latency::ApplicationMessage<StateT>) {
+    pub fn send_low_latency(&mut self, msg: low_latency::ApplicationMessage) {
         self.to_low_latency_servicer.send(msg);
     }
 
     pub fn send_reliable(&mut self, msg: reliable::ApplicationMessage) {
         self.to_reliable_servicer.send(msg);
+    }
+
+    pub fn receive_iter(&mut self) -> mpsc::Iter<ServicerMessage> {
+        self.from_servicer.iter()
     }
 
     pub fn quit(mut self) {
@@ -97,64 +94,14 @@ where
     }
 }
 
-pub fn drain_receiver<M: Send>(receiver: &mut spmc::Receiver<M>) -> Result<Vec<M>, msg::Drop> {
-    let mut msgs = vec![];
-    loop {
-        // Receive inputs from the application thread.
-        match receiver.try_recv() {
-            Ok(msg) => {
-                msgs.push(msg);
-            }
-            Err(spmc::TryRecvError::Empty) => {
-                return Ok(msgs);
-            }
-            Err(spmc::TryRecvError::Disconnected) => {
-                // The application thread disconnected; we should begin shutting down.
-                return Err(msg::Drop::ApplicationThreadDisconnected);
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn drain_receiver_empty() {
-        let (mut to, mut from): (spmc::Sender<AtomicBool>, spmc::Receiver<AtomicBool>) =
-            spmc::channel();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect zero messages to arrive.
-        assert_eq!(0, msgs.len());
-    }
-
-    #[test]
-    fn drain_receiver_nonempty() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect exactly one message with a value of "true" to arrive.
-        assert_eq!(1, msgs.len());
-        assert_eq!(true, msgs[0].load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn drain_receiver_disconnected() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        drop(to);
-
-        // Even though we sent something, if the channel has been disconnected, we don't want to
-        // process any further.
-        assert!(drain_receiver(&mut from).is_err());
-    }
-
-    #[test]
     fn try_udp() {
-        let mut socket = UdpSocket::bind("127.0.0.1:34254").unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:34254").unwrap();
 
         // Receives a single datagram message on the socket. If `buf` is too small to hold
         // the message, it will be cut off.

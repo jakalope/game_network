@@ -58,6 +58,7 @@ impl ControllerSequence {
             let end = std::cmp::min(tick_count, self.seq.len());
             self.seq.drain(0..end);
         }
+        self.start_tick = last_tick + 1;
     }
 }
 
