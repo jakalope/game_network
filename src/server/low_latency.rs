@@ -73,8 +73,11 @@ where
     to_application: mpsc::Sender<server::ServicerMessage>,
 
     /// Our in-process transport from the application thread to all low-latency servicers.
-    // TODO Do we want more than one Udp socket to send things like world-state concurrently?
-    // We could use a job queue and generate N low latency servicers.
+    // TODO Do we want more than one low-latency servicer connected to the same port to send/receive
+    // concurrently?  We could use a job queue and generate N low latency servicers.
+    // https://blog.cloudflare.com/how-to-receive-a-million-packets/
+    // https://lwn.net/Articles/542629/
+    // https://stackoverflow.com/questions/40468685/how-to-set-the-socket-option-so-reuseport-in-rust
     from_application: spmc::Receiver<ApplicationMessage<StateT>>,
 
     address_user: bidir_map::BidirMap<std::net::SocketAddr, msg::Username>,

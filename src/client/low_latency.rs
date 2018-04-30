@@ -5,7 +5,7 @@ use msg;
 use serde;
 use spmc;
 use std::io::Read;
-use std::net::{TcpStream, SocketAddrV4, UdpSocket};
+use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
 
@@ -16,42 +16,40 @@ where
     StateT: serde::Serialize,
     StateT: Send,
 {
+    receive_buf: Vec<u8>,
     udp_socket: UdpSocket,
-    server_addr: SocketAddrV4,
-    self_addr: SocketAddrV4,
-    controller_seq: control::ControllerSequence,
-    to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
-    // from_application: spmc::Receiver<client::ApplicationMessage<StateT>>,
+    server_addr: SocketAddr,
+    self_addr: SocketAddr,
+    to_application: mpsc::Sender<msg::low_latency::ServerMessage<StateT>>,
+    from_application: mpsc::Receiver<msg::low_latency::ClientMessage>,
 }
 
 impl<StateT> Servicer<StateT>
 where
+    StateT: serde::de::DeserializeOwned,
     StateT: serde::Serialize,
     StateT: Send,
 {
     pub fn connect(
-        self_addr: SocketAddrV4,
-        server_addr: SocketAddrV4,
+        mut udp_socket: UdpSocket,
+        server_addr: SocketAddr,
         to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
-        // from_application: spmc::Receiver<client::ApplicationMessage<StateT>>,
+        from_application: mpsc::Receiver<msg::low_latency::ClientMessage>,
     ) -> std::io::Result<Self> {
-        let udp_socket = UdpSocket::bind(&self_addr)?;
         udp_socket.connect(&server_addr)?;
+        udp_socket.set_nonblocking(true)?;
         Ok(Servicer {
+            receive_buf: vec![],
             udp_socket: udp_socket,
             server_addr: server_addr,
-            self_addr: self_addr,
+            self_addr: udp_socket.local_addr()?,
             controller_seq: control::ControllerSequence::new(),
             to_application: to_application,
             // from_application: from_application,
         })
     }
 
-    pub fn spin(&mut self)
-    where
-        StateT: serde::de::DeserializeOwned,
-        StateT: serde::Serialize,
-    {
+    pub fn spin(&mut self) {
         loop {
             match self.spin_once() {
                 Ok(()) => {}
@@ -70,46 +68,46 @@ where
         info!("Exiting client low latency servicer");
     }
 
-    fn spin_once(&mut self) -> Result<(), msg::CommError>
-    where
-        StateT: serde::de::DeserializeOwned,
-        StateT: serde::Serialize,
-    {
-        // Receive only from the connected server.
-        let mut buf = Vec::<u8>::new();
-        self.udp_socket.recv(&mut buf).map_err(|err| {
-            msg::CommError::from(err)
-        })?;
+    fn spin_once(&mut self) -> Result<(), msg::CommError> {}
 
-        // Deserialize the received datagram.
-        let server_message: msg::low_latency::ServerMessage<StateT> =
-            bincode::deserialize(&buf[..]).map_err(|err| {
-                msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
-            })?;
+    fn forward_from_server_to_client(&mut self) -> Result<(), msg::CommError> {
+        loop {
+            receive_buf.clear();
+            match self.udp_socket.recv(&mut receive_buf) {
+                Some(_) => {
+                    // Deserialize the received datagram.
+                    let server_message: msg::low_latency::ServerMessage<StateT> =
+                        bincode::deserialize(&buf[..]).map_err(|err| {
+                            msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
+                        })?;
 
-        match server_message {
-            msg::low_latency::ServerMessage::WorldState(state) => {
-                // The message contains the latest controller input the server has received
-                // from us.
-                self.handle_world_state(state)
-            }
+                    // Send it on to the client application thread.
+                    self.to_application.send(server_message).map_err(|err| {
+                        msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
+                    })
+                },
+                Err(std::io::ErrorKind::WouldBlock) => {
+                    // Assuming here that `WouldBlock` implies there is no data in the buffer.
+                    return Ok(()),
+                },
+                Err(err) => {
+                    return Err(msg::CommError::from(err));
+                },
+            };
         }
     }
 
-    fn handle_world_state<'de>(&mut self, state: StateT) -> Result<(), msg::CommError>
-    where
-        StateT: serde::Deserialize<'de>,
-        StateT: serde::Serialize,
-    {
-        self.to_application
-            .send(client::ServicerMessage::WorldState(state))
-            .map_err(|err| {
-                msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
-            })
+    fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
+        loop {
+            match self.from_application
+        }
     }
 
     // TODO Do we want/need a from_application for this?
-    pub fn send_controller_inputs(&self) -> Result<(), msg::CommError> {
+    fn send_controller_inputs(&self) -> Result<(), msg::CommError> {
+
+
+
         if !self.controller_seq.is_empty() {
             let payload = self.controller_seq.to_compressed().ok_or(
                 msg::CommError::Warning(

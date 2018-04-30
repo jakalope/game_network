@@ -3,7 +3,7 @@ use control;
 use msg;
 use serde;
 use std::io::{Read, Write};
-use std::net::{TcpStream, SocketAddrV4, UdpSocket};
+use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
 
@@ -30,31 +30,38 @@ fn receive_server_message(
 pub struct Servicer {
     tcp_stream: TcpStream,
     to_application: mpsc::Sender<msg::reliable::ServerMessage>,
+    from_application: mpsc::Receiver<msg::reliable::ClientMessage>,
     server_udp_port: Option<u16>,
 }
 
 impl Servicer {
     pub fn connect(
         cred: msg::Credentials,
-        server_addr: SocketAddrV4,
+        server_addr: SocketAddr,
         mut tcp_stream: TcpStream,
         to_application: mpsc::Sender<msg::reliable::ServerMessage>,
+        from_application: mpsc::Receiver<msg::reliable::ClientMessage>,
     ) -> Result<Self, msg::CommError> {
-
+        // Create, serialize, and send a join request to the server.
         let request = msg::reliable::ClientMessage::JoinRequest(cred);
+
         let encoded_request: Vec<u8> = bincode::serialize(&request).map_err(|err| {
             msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
         })?;
+
         tcp_stream.write(&encoded_request).map_err(|err| {
             msg::CommError::from(err)
         })?;
 
+        // Create the servicer.
         let mut servicer = Servicer {
             tcp_stream: tcp_stream,
             to_application: to_application,
+            from_application: from_application,
             server_udp_port: None,
         };
 
+        // Wait for the server's join response.
         loop {
             match servicer.spin_once() {
                 Ok(()) => { if let Some(_) = servicer.server_udp_port() { return Ok(servicer);} }
@@ -69,9 +76,11 @@ impl Servicer {
         return self.server_udp_port;
     }
 
-    pub fn spin(&mut self) -> Result<(), msg::CommError> {
-        while let Ok(_) = self.spin_once() {}
-        Ok(())
+    pub fn spin(&mut self) {
+        while let Ok(_) = self.spin_once() {
+            // There is no reason this thread should need to operate faster than 60Hz.
+            std::thread::sleep(std::time::Duration::from_millis((1000.0 / 60.0) as i32));
+        }
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
@@ -87,7 +96,7 @@ impl Servicer {
     }
 
     fn handle_last_tick_received(&mut self, last_tick: usize) -> Result<(), msg::CommError> {
-        // TODO this needs to be handled in the application thread in order to sync with the
+        // This needs to be handled in the application thread in order to sync with the
         // low latency servicer.
         // Now we remove the controller inputs the server has ACK'd.
         // self.controller_seq.remove_till_tick(last_tick + 1);
@@ -118,7 +127,7 @@ impl Servicer {
         chat: msg::reliable::ChatMessage,
     ) -> Result<(), msg::CommError> {
         self.to_application
-            .send(msg::reliable::ServerMessage::ChatMessage(chat))
+            .send(super::ServicerMessage::ChatMessage(chat))
             .map_err(|err| {
                 msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
             })

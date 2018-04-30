@@ -85,6 +85,10 @@ where
         self.to_reliable_servicer.send(msg);
     }
 
+    pub fn receive_iter(&mut self) -> mpsc::Receiver<ServicerMessage>::Iter {
+        return from_servicer.iter();
+    }
+
     pub fn quit(mut self) {
         // Tell the TCP listener to shut down, then join.
         self.listener_kill_switch.store(false, Ordering::Relaxed);
