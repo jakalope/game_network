@@ -1,4 +1,5 @@
 use bincode;
+use bitvec;
 use client;
 use control;
 use msg;
@@ -8,6 +9,15 @@ use std::io::Read;
 use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
+use drain_receiver;
+
+/// Represents messages a client application thread can send to a client low latency servicer
+/// thread.
+#[derive(Clone)]
+pub enum ApplicationMessage {
+    /// An uncompressed bit-vector, representing a snapshot of the player's controls.
+    Control(bitvec::BitVec),
+}
 
 /// Services a client using a low-latency transport (Udp). Communicates messages to the
 /// application thread via an in-process queue.
@@ -20,8 +30,9 @@ where
     udp_socket: UdpSocket,
     server_addr: SocketAddr,
     self_addr: SocketAddr,
+    controller_seq: control::ControllerSequence,
     to_application: mpsc::Sender<msg::low_latency::ServerMessage<StateT>>,
-    from_application: mpsc::Receiver<msg::low_latency::ClientMessage>,
+    from_application: mpsc::Receiver<ApplicationMessage>,
 }
 
 impl<StateT> Servicer<StateT>
@@ -33,8 +44,8 @@ where
     pub fn connect(
         mut udp_socket: UdpSocket,
         server_addr: SocketAddr,
-        to_application: mpsc::Sender<client::ServicerMessage<StateT>>,
-        from_application: mpsc::Receiver<msg::low_latency::ClientMessage>,
+        to_application: mpsc::Sender<msg::low_latency::ServerMessage<StateT>>,
+        from_application: mpsc::Receiver<ApplicationMessage>,
     ) -> std::io::Result<Self> {
         udp_socket.connect(&server_addr)?;
         udp_socket.set_nonblocking(true)?;
@@ -45,7 +56,7 @@ where
             self_addr: udp_socket.local_addr()?,
             controller_seq: control::ControllerSequence::new(),
             to_application: to_application,
-            // from_application: from_application,
+            from_application: from_application,
         })
     }
 
@@ -72,42 +83,72 @@ where
 
     fn forward_from_server_to_client(&mut self) -> Result<(), msg::CommError> {
         loop {
-            receive_buf.clear();
-            match self.udp_socket.recv(&mut receive_buf) {
+            self.receive_buf.clear();
+            match self.udp_socket.recv(&mut self.receive_buf) {
                 Some(_) => {
                     // Deserialize the received datagram.
                     let server_message: msg::low_latency::ServerMessage<StateT> =
-                        bincode::deserialize(&buf[..]).map_err(|err| {
+                        bincode::deserialize(&self.receive_buf[..]).map_err(|err| {
                             msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
                         })?;
-
-                    // Send it on to the client application thread.
-                    self.to_application.send(server_message).map_err(|err| {
-                        msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
-                    })
-                },
+                    return self.parse_server_message(server_message);
+                }
                 Err(std::io::ErrorKind::WouldBlock) => {
                     // Assuming here that `WouldBlock` implies there is no data in the buffer.
-                    return Ok(()),
-                },
+                    return Ok(());
+                }
                 Err(err) => {
                     return Err(msg::CommError::from(err));
-                },
+                }
             };
         }
     }
 
-    fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
-        loop {
-            match self.from_application
+    fn parse_server_message(
+        &mut self,
+        server_message: msg::low_latency::ServerMessage<StateT>,
+    ) -> Result<(), msg::CommError> {
+        match server_message {
+            msg::low_latency::ServerMessage::WorldState(state) => {
+                // Send it on to the client application thread.
+                return self.to_application.send(server_message).map_err(|err| {
+                    msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
+                });
+            }
+            msg::low_latency::ServerMessage::LastTickReceived(tick) => {
+                // Update the controller sequence, removing inputs of ticks already received by the
+                // server.
+                self.controller_seq.remove_till_tick(tick);
+                return Ok(());
+            }
         }
     }
 
-    // TODO Do we want/need a from_application for this?
+    fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
+        match drain_receiver(self.from_application) {
+            Ok(msg_vec) => {
+                self.parse_application_messages(msg_vec);
+                return self.send_controller_inputs();
+            }
+            Err(_) => {
+                return Err(msg::CommError::Exit);
+            }
+        }
+    }
+
+    // Parse a vector of app messages.
+    fn parse_application_messages(&mut self, msg_vec: &Vec<ApplicationMessage>) {
+        for msg in msg_vec.drain(..) {
+            match msg {
+                ApplicationMessage::Control(controller_state) => {
+                    self.controller_seq.push(controller_state);
+                }
+            }
+        }
+    }
+
+    // Send controller inputs from the client to the server over this low latency transport.
     fn send_controller_inputs(&self) -> Result<(), msg::CommError> {
-
-
-
         if !self.controller_seq.is_empty() {
             let payload = self.controller_seq.to_compressed().ok_or(
                 msg::CommError::Warning(

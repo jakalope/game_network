@@ -39,7 +39,7 @@ where
     }
 }
 
-/// Represents a message from the application thread to the low latency servicer.
+/// Represents a message from the server application thread to the server low latency servicer.
 #[derive(Clone)]
 pub enum ApplicationMessage<StateT>
 where

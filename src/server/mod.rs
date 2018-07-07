@@ -12,6 +12,7 @@ use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std;
+use super::drain_receiver;
 
 /// Represents messages passed from client servicer threads to the main application thread.
 #[derive(Clone)]
@@ -85,8 +86,8 @@ where
         self.to_reliable_servicer.send(msg);
     }
 
-    pub fn receive_iter(&mut self) -> mpsc::Receiver<ServicerMessage>::Iter {
-        return from_servicer.iter();
+    pub fn receive_iter(&mut self) -> mpsc::Iter<ServicerMessage> {
+        self.from_servicer.iter()
     }
 
     pub fn quit(mut self) {
@@ -101,60 +102,10 @@ where
     }
 }
 
-pub fn drain_receiver<M: Send>(receiver: &mut spmc::Receiver<M>) -> Result<Vec<M>, msg::Drop> {
-    let mut msgs = vec![];
-    loop {
-        // Receive inputs from the application thread.
-        match receiver.try_recv() {
-            Ok(msg) => {
-                msgs.push(msg);
-            }
-            Err(spmc::TryRecvError::Empty) => {
-                return Ok(msgs);
-            }
-            Err(spmc::TryRecvError::Disconnected) => {
-                // The application thread disconnected; we should begin shutting down.
-                return Err(msg::Drop::ApplicationThreadDisconnected);
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn drain_receiver_empty() {
-        let (mut to, mut from): (spmc::Sender<AtomicBool>, spmc::Receiver<AtomicBool>) =
-            spmc::channel();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect zero messages to arrive.
-        assert_eq!(0, msgs.len());
-    }
-
-    #[test]
-    fn drain_receiver_nonempty() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        let msgs = drain_receiver(&mut from).expect("spmc disconnected unexpectedly");
-
-        // Expect exactly one message with a value of "true" to arrive.
-        assert_eq!(1, msgs.len());
-        assert_eq!(true, msgs[0].load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn drain_receiver_disconnected() {
-        let (mut to, mut from) = spmc::channel();
-        to.send(AtomicBool::new(true)).unwrap();
-        drop(to);
-
-        // Even though we sent something, if the channel has been disconnected, we don't want to
-        // process any further.
-        assert!(drain_receiver(&mut from).is_err());
-    }
 
     #[test]
     fn try_udp() {

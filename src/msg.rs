@@ -1,4 +1,5 @@
 use bincode;
+use bitvec;
 use control;
 use serde;
 use std;
@@ -117,8 +118,6 @@ pub mod reliable {
     pub enum ServerMessage {
         JoinResponse(JoinResponse),
         ChatMessage(ChatMessage),
-        /// World tick number for the latest client controller input received.
-        LastTickReceived(usize),
     }
 }
 
@@ -141,6 +140,8 @@ pub mod low_latency {
     {
         /// The latest segment of world state needed by a specific client.
         WorldState(StateT),
+        /// World tick number for the latest client controller input received.
+        LastTickReceived(usize),
     }
 }
 
