@@ -46,7 +46,10 @@ impl Client {
         // Grab a UDP socket so we can setup our credentials. Don't bother connecting it to the
         // server address yet. This will be done by the low-latency servicer.
         let udp_socket = {
-            let raw_udp_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let raw_udp_addr = SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                0,
+            );
             UdpSocket::bind(raw_udp_addr).map_err(|err| msg::CommError::from(err))
         }?;
         let local_udp_addr = udp_socket.local_addr()?;

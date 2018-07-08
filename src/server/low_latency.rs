@@ -15,7 +15,7 @@ use super::drain_receiver;
 
 /// Represents a message from the application thread to the low latency servicer, bound for the
 /// client.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToClient {
     /// The user `payload` is intended for.
     pub to: msg::Username,
@@ -34,7 +34,7 @@ impl ToClient {
 }
 
 /// Represents a message from the server application thread to the server low latency servicer.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ApplicationMessage {
     /// A message to be forwarded to a specific client.
     ToClient(ToClient),
@@ -111,7 +111,7 @@ impl Servicer {
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
-        let mut to_client = None;
+        let mut to_client;
         match drain_receiver(&mut self.from_application) {
             Ok(mut msg_vec) => {
                 to_client = parse_application_messages(msg_vec, &mut self.address_user);
@@ -120,8 +120,10 @@ impl Servicer {
                 return Err(msg::CommError::Exit);
             }
         }
-        if let Some(msg) = to_client {
-            send_message(&self.address_user, &self.udp_socket, msg)?;
+        for opt_msg in to_client.into_iter() {
+            if let Some(msg) = opt_msg {
+                send_message(&self.address_user, &self.udp_socket, msg)?;
+            }
         }
 
         // Receive inputs from the network.
@@ -182,18 +184,22 @@ impl Servicer {
 fn parse_application_messages(
     mut msg_vec: Vec<ApplicationMessage>,
     address_user: &mut bidir_map::BidirMap<std::net::SocketAddr, msg::Username>,
-) -> Option<ToClient> {
-    let mut world_state_opt = None;
+) -> [Option<ToClient>; 2] {
+    const WORLD_STATE: usize = 0;
+    const LAST_TICK: usize = 1;
+    let mut outgoing = [None, None];
+
     for msg in msg_vec.drain(..) {
         match msg {
             ApplicationMessage::ToClient(to_client) => {
                 // We should only store the most recent of each variant.
-                // Since at the moment we only have a WorldState, this is trivial.
                 match to_client.payload {
                     msg::low_latency::ServerMessage::WorldState(_) => {
-                        world_state_opt = Some(to_client);
+                        outgoing[WORLD_STATE] = Some(to_client);
                     }
-                    msg::low_latency::ServerMessage::LastTickReceived(_) => {}
+                    msg::low_latency::ServerMessage::LastTickReceived(_) => {
+                        outgoing[LAST_TICK] = Some(to_client);
+                    }
                 }
             }
             ApplicationMessage::NewClient(client_data) => {
@@ -204,13 +210,13 @@ fn parse_application_messages(
             }
         }
     }
-    world_state_opt
+    outgoing
 }
 
 fn send_message(
     address_user: &bidir_map::BidirMap<std::net::SocketAddr, msg::Username>,
     udp_socket: &UdpSocket,
-    msg: ToClient,
+    msg: &ToClient,
 ) -> Result<(), msg::CommError> {
     // If we have the designated user in our address book, send them the
     // message via Udp. Otherwise, log a warning.
@@ -246,8 +252,11 @@ mod tests {
             }),
         ];
         let mut address_user = bidir_map::BidirMap::new();
-        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
+        let outgoing_msgs = parse_application_messages(msg_vec, &mut address_user);
+        let world_state_opt = &outgoing_msgs[0];
+        let last_tick = &outgoing_msgs[1];
         assert!(world_state_opt.is_some());
+        assert!(last_tick.is_none());
         assert!(!address_user.is_empty());
     }
 
@@ -260,14 +269,38 @@ mod tests {
             )),
             ApplicationMessage::ToClient(ToClient::new(
                 msg::Username(String::from("to_client")),
+                msg::low_latency::ServerMessage::LastTickReceived(2),
+            )),
+            ApplicationMessage::ToClient(ToClient::new(
+                msg::Username(String::from("to_client")),
+                msg::low_latency::ServerMessage::LastTickReceived(3),
+            )),
+            ApplicationMessage::ToClient(ToClient::new(
+                msg::Username(String::from("to_client")),
                 msg::low_latency::ServerMessage::WorldState(vec![123]),
             )),
         ];
         let mut address_user = bidir_map::BidirMap::new();
-        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
+        let outgoing_msgs = parse_application_messages(msg_vec, &mut address_user);
+        let world_state_opt = &outgoing_msgs[0];
+        let last_tick = &outgoing_msgs[1];
+
+        // Expect the latter of the two world states to have been received.
         assert_eq!(
-            msg::low_latency::ServerMessage::WorldState(vec![123]),
-            world_state_opt.unwrap().payload
+            &Some(ToClient::new(
+                msg::Username(String::from("to_client")),
+                msg::low_latency::ServerMessage::WorldState(vec![123]),
+            )),
+            world_state_opt
+        );
+
+        // Expect the latter of the two ticks-received to have been received.
+        assert_eq!(
+            &Some(ToClient::new(
+                msg::Username(String::from("to_client")),
+                msg::low_latency::ServerMessage::LastTickReceived(3),
+            )),
+            last_tick
         );
     }
 
@@ -282,8 +315,11 @@ mod tests {
                 ApplicationMessage::ClientDisconnect(msg::Username(String::from("client_data"))),
             ];
         let mut address_user = bidir_map::BidirMap::new();
-        let world_state_opt = parse_application_messages(msg_vec, &mut address_user);
+        let outgoing_msgs = parse_application_messages(msg_vec, &mut address_user);
+        let world_state_opt = &outgoing_msgs[0];
+        let last_tick = &outgoing_msgs[1];
         assert!(world_state_opt.is_none());
+        assert!(last_tick.is_none());
         assert!(address_user.is_empty());
     }
 
@@ -301,7 +337,7 @@ mod tests {
             to: msg::Username(String::from("client_data")),
             payload: msg::low_latency::ServerMessage::WorldState(vec![127]),
         };
-        send_message(&address_user, &socket, msg).unwrap();
+        send_message(&address_user, &socket, &msg).unwrap();
 
         let mut buf = [0; 1500];
         socket.recv_from(&mut buf).unwrap();

@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 pub struct Username(pub String);
 
 /// Data owned by the server about a client.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ClientData {
     /// This user's in-game nickname.
     pub username: Username,
