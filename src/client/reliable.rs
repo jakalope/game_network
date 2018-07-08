@@ -7,6 +7,18 @@ use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
 
+/// Represents messages a client application thread can send to a client reliable servicer thread.
+#[derive(Clone)]
+pub enum ApplicationMessage {
+    ChatMessage(String),
+}
+
+/// Represents messages a client reliable servicer thread can send to a client application thread.
+#[derive(Clone)]
+pub enum ServicerMessage {
+    ChatMessage(msg::reliable::ChatMessage),
+}
+
 fn receive_server_message(
     tcp_stream: &mut TcpStream,
 ) -> Result<msg::reliable::ServerMessage, msg::CommError> {
@@ -29,8 +41,8 @@ fn receive_server_message(
 
 pub struct Servicer {
     tcp_stream: TcpStream,
-    to_application: mpsc::Sender<msg::reliable::ServerMessage>,
-    from_application: mpsc::Receiver<msg::reliable::ClientMessage>,
+    to_application: mpsc::Sender<ServicerMessage>,
+    from_application: mpsc::Receiver<ApplicationMessage>,
     server_udp_port: Option<u16>,
 }
 
@@ -39,8 +51,8 @@ impl Servicer {
         cred: msg::Credentials,
         server_addr: SocketAddr,
         mut tcp_stream: TcpStream,
-        to_application: mpsc::Sender<msg::reliable::ServerMessage>,
-        from_application: mpsc::Receiver<msg::reliable::ClientMessage>,
+        to_application: mpsc::Sender<ServicerMessage>,
+        from_application: mpsc::Receiver<ApplicationMessage>,
     ) -> Result<Self, msg::CommError> {
         // Create, serialize, and send a join request to the server.
         let request = msg::reliable::ClientMessage::JoinRequest(cred);
@@ -116,7 +128,7 @@ impl Servicer {
         chat: msg::reliable::ChatMessage,
     ) -> Result<(), msg::CommError> {
         self.to_application
-            .send(msg::reliable::ServerMessage::ChatMessage(chat))
+            .send(ServicerMessage::ChatMessage(chat))
             .map_err(|err| {
                 msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
             })

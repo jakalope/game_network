@@ -25,8 +25,8 @@ pub struct Client {
     /// disconnect, this should be set to true.
     shutdown: bool,
 
-    from_reliable_servicer: mpsc::Receiver<msg::reliable::ServerMessage>,
-    to_reliable_servicer: mpsc::Sender<msg::reliable::ClientMessage>,
+    from_reliable_servicer: mpsc::Receiver<reliable::ServicerMessage>,
+    to_reliable_servicer: mpsc::Sender<reliable::ApplicationMessage>,
     reliable_spin_handle: std::thread::JoinHandle<()>,
 
     from_low_latency_servicer: mpsc::Receiver<low_latency::ServicerMessage>,
@@ -112,10 +112,7 @@ impl Client {
                 }
                 Ok(next_msg) => {
                     match next_msg {
-                        msg::reliable::ServerMessage::JoinResponse(_) => {
-                            // Unexpected message type for this context. Ignore.
-                        }
-                        msg::reliable::ServerMessage::ChatMessage(chat) => {
+                        reliable::ServicerMessage::ChatMessage(chat) => {
                             self.chat_history.push(chat);
                         }
                     }
@@ -151,7 +148,6 @@ impl Client {
     /// Returns `false` if there is no connection to the server or if there was a problem
     /// compressing the control sequence. Otherwise returns `true`.
     pub fn send_controller_input(&mut self, controller_input: bitvec::BitVec) -> bool {
-        self.drain_from_low_latency();
         if self.shutdown {
             return false;
         }
@@ -164,17 +160,19 @@ impl Client {
     }
 
     pub fn send_chat_message(&mut self, chat_msg: String) {
-        let msg = msg::reliable::ClientMessage::ChatMessage(chat_msg);
+        let msg = reliable::ApplicationMessage::ChatMessage(chat_msg);
         self.to_reliable_servicer.send(msg);
     }
 
     pub fn take_world_state(&mut self) -> Option<Vec<u8>> {
+        self.drain_from_low_latency();
         let mut world_state = None;
         std::mem::swap(&mut self.world_state, &mut world_state);
         world_state
     }
 
     pub fn take_chat_history(&mut self) -> Vec<msg::reliable::ChatMessage> {
+        self.drain_from_reliable();
         let mut chat_history = vec![];
         std::mem::swap(&mut self.chat_history, &mut chat_history);
         chat_history
