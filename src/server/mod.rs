@@ -12,7 +12,6 @@ use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std;
-use super::drain_receiver;
 
 /// Represents messages passed from client servicer threads to the main application thread.
 #[derive(Clone)]

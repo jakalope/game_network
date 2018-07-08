@@ -10,7 +10,7 @@ use serde;
 use bincode;
 use spmc;
 use bidir_map;
-use super::drain_receiver;
+use util::drain_spmc_receiver;
 
 
 /// Represents a message from the application thread to the low latency servicer, bound for the
@@ -69,6 +69,8 @@ pub struct Servicer {
 
     address_user: bidir_map::BidirMap<std::net::SocketAddr, msg::Username>,
 
+    last_tick_received: usize,
+
     /// When `true`, the server will terminate any open connections and stop servicing inputs.
     shutting_down: bool,
 }
@@ -84,6 +86,7 @@ impl Servicer {
             to_application: to_application,
             from_application: from_application,
             address_user: bidir_map::BidirMap::<std::net::SocketAddr, msg::Username>::new(),
+            last_tick_received: 0,
             shutting_down: false,
         }
     }
@@ -111,8 +114,15 @@ impl Servicer {
     }
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
+        self.forward_from_server_to_client()?;
+        self.forward_from_client_to_server()?;
+        Ok(())
+    }
+
+    // Service the queue of messages coming from the server application thread.
+    fn forward_from_server_to_client(&mut self) -> Result<(), msg::CommError> {
         let mut to_client;
-        match drain_receiver(&mut self.from_application) {
+        match drain_spmc_receiver(&mut self.from_application) {
             Ok(mut msg_vec) => {
                 to_client = parse_application_messages(msg_vec, &mut self.address_user);
             }
@@ -120,17 +130,31 @@ impl Servicer {
                 return Err(msg::CommError::Exit);
             }
         }
+
+        // Send each outgoing message to the client.
         for opt_msg in to_client.into_iter() {
             if let Some(msg) = opt_msg {
                 send_message(&self.address_user, &self.udp_socket, msg)?;
             }
         }
+        Ok(())
+    }
 
-        // Receive inputs from the network.
+    // Receive inputs from the network.
+    fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
+        // TODO do we need to size the buffer before calling recv_from()?
         let mut buf = Vec::<u8>::new();
         match self.udp_socket.recv_from(&mut buf) {
             Ok((_, src)) => self.process_udp(src, &buf),
-            Err(err) => Err(msg::CommError::Warning(msg::Warning::IoFailure(err))),
+            Err(err) => {
+                match err.kind() {
+                    // Timing out probably just means we didn't we didn't receive any data.
+                    std::io::ErrorKind::WouldBlock => Ok(()),
+                    std::io::ErrorKind::TimedOut => Ok(()),
+                    // Other errors are unexpected.
+                    _ => Err(msg::CommError::Warning(msg::Warning::IoFailure(err))),
+                }
+            }
         }
     }
 
@@ -141,25 +165,18 @@ impl Servicer {
                 msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
             })?;
 
-        let response = match client_message {
+        match client_message {
             msg::low_latency::ClientMessage::ControllerInput(input) => {
                 self.handle_controller_input(src, input)
             }
-        }?;
-
-        self.to_application.send(response).map_err(
-            // Application thread closed the in-process connection, so we should exit gracefully.
-            |_| msg::CommError::Exit,
-        )?;
-
-        Ok(())
+        }
     }
 
     fn handle_controller_input(
         &mut self,
         src: std::net::SocketAddr,
         input: control::CompressedControllerSequence,
-    ) -> Result<server::ServicerMessage, msg::CommError> {
+    ) -> Result<(), msg::CommError> {
         // Lookup the user given the source socket address.
         let user = self.address_user.get_by_first(&src).ok_or(
             msg::CommError::Warning(msg::Warning::UnknownSource(src)),
@@ -172,10 +189,28 @@ impl Servicer {
             ),
         )?;
 
-        Ok(server::ServicerMessage {
-            from: user.clone(),
-            payload: server::ServicerPayload::ControllerSequence(controller_seq),
-        })
+        // Update the latest controller sequence tick received.
+        if controller_seq.last_tick() > self.last_tick_received {
+            self.last_tick_received = controller_seq.last_tick();
+
+            // Send the updated controller sequence to the server application thread.
+            let to_server_application = server::ServicerMessage {
+                from: user.clone(),
+                payload: server::ServicerPayload::ControllerSequence(controller_seq),
+            };
+
+            self.to_application.send(to_server_application).map_err(
+                // Application thread closed the in-process connection, so we should exit gracefully.
+                |_| msg::CommError::Exit,
+            )?;
+        }
+
+        // Send an ACK of the latest tick received back to the client.
+        let ack_msg = ToClient::new(
+            user.clone(),
+            msg::low_latency::ServerMessage::LastTickReceived(self.last_tick_received),
+        );
+        send_message(&self.address_user, &self.udp_socket, &ack_msg)
     }
 }
 

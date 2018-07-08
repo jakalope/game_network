@@ -9,7 +9,7 @@ use std::io::Read;
 use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
-use drain_mpsc_receiver;
+use util::drain_mpsc_receiver;
 
 /// Represents messages a client application thread can send to a client low latency servicer
 /// thread.

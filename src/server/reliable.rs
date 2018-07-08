@@ -10,7 +10,7 @@ use std::net::{TcpStream, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std;
-use super::drain_receiver;
+use util::drain_spmc_receiver;
 
 /// Represents a message from the application thread to the low latency servicer, bound for the
 /// client.
@@ -215,7 +215,7 @@ impl Servicer {
 
     fn spin_once(&mut self) -> Result<(), msg::CommError> {
         // Receive messages from the server application thread.
-        let mut msg_vec = match drain_receiver(&mut self.from_application) {
+        let mut msg_vec = match drain_spmc_receiver(&mut self.from_application) {
             Ok(msgs) => msgs,
             Err(drop) => {
                 // If the server application thread has begun shutting down, we should also shut
