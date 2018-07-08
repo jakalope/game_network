@@ -10,7 +10,7 @@ use serde;
 use bincode;
 use spmc;
 use bidir_map;
-use util::drain_spmc_receiver;
+use util::{drain_spmc_receiver, maybe_receive_udp};
 
 
 /// Represents a message from the application thread to the low latency servicer, bound for the
@@ -142,19 +142,10 @@ impl Servicer {
 
     // Receive inputs from the network.
     fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
-        // TODO do we need to size the buffer before calling recv_from()?
-        let mut buf = Vec::<u8>::new();
-        match self.udp_socket.recv_from(&mut buf) {
-            Ok((_, src)) => self.process_udp(src, &buf),
-            Err(err) => {
-                match err.kind() {
-                    // Timing out probably just means we didn't we didn't receive any data.
-                    std::io::ErrorKind::WouldBlock => Ok(()),
-                    std::io::ErrorKind::TimedOut => Ok(()),
-                    // Other errors are unexpected.
-                    _ => Err(msg::CommError::Warning(msg::Warning::IoFailure(err))),
-                }
-            }
+        match maybe_receive_udp(&self.udp_socket) {
+            Ok(Some((buf, src))) => self.process_udp(src, &buf),
+            Ok(None) => Ok(()),
+            Err(err) => Err(err),
         }
     }
 
