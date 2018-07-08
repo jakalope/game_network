@@ -141,9 +141,9 @@ impl Client {
         }
     }
 
-    /// First, we drain the low-latency receive buffer. If the servicer is still connected, we then
-    /// add `controller_input` to the unacknowledged controller input sequence. The servicer handles
-    /// the compression and network transmission.
+    /// If the servicer is still connected, we add `controller_input` to the list of unacknowledged
+    /// controller inputs. The servicer handles the compression, network transmission, and
+    /// receipt of acknowledgment for any inputs the server has received.
     ///
     /// Returns `false` if there is no connection to the server or if there was a problem
     /// compressing the control sequence. Otherwise returns `true`.
@@ -160,19 +160,38 @@ impl Client {
     }
 
     pub fn send_chat_message(&mut self, chat_msg: String) {
+        if self.shutdown {
+            return;
+        }
+        // Send the chat string to the reliable servicer, who forwards it to the server. The server
+        // is responsible for populating the username attached to the chat message.
         let msg = reliable::ApplicationMessage::ChatMessage(chat_msg);
         self.to_reliable_servicer.send(msg);
     }
 
     pub fn take_world_state(&mut self) -> Option<Vec<u8>> {
+        if self.shutdown {
+            return None;
+        }
+        // Drain the incoming message queue from our low latency servicer before giving away our
+        // world state (which comes from the low latency servicer).
         self.drain_from_low_latency();
+
+        // Use a swap trick to give away our internal data without invalidating its variable.
         let mut world_state = None;
         std::mem::swap(&mut self.world_state, &mut world_state);
         world_state
     }
 
     pub fn take_chat_history(&mut self) -> Vec<msg::reliable::ChatMessage> {
+        if self.shutdown {
+            return vec![];
+        }
+        // Drain the incoming message queue from our reliable servicer before giving away our chat
+        // history (which comes from the reliable servicer).
         self.drain_from_reliable();
+
+        // Use a swap trick to give away our internal data without invalidating its variable.
         let mut chat_history = vec![];
         std::mem::swap(&mut self.chat_history, &mut chat_history);
         chat_history
