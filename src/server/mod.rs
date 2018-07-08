@@ -41,6 +41,7 @@ pub struct Server {
     from_servicer: mpsc::Receiver<ServicerMessage>,
     to_low_latency_servicer: spmc::Sender<low_latency::ApplicationMessage>,
     to_reliable_servicer: spmc::Sender<reliable::ApplicationMessage>,
+    shutdown: bool,
 }
 
 impl Server {
@@ -66,6 +67,7 @@ impl Server {
             from_servicer: from_servicer,
             to_low_latency_servicer: to_low_latency_servicer,
             to_reliable_servicer: to_reliable_servicer,
+            shutdown: false,
         }
     }
 
@@ -74,7 +76,10 @@ impl Server {
     }
 
     pub fn send_reliable(&mut self, msg: reliable::ApplicationMessage) {
-        self.to_reliable_servicer.send(msg);
+        if self.to_reliable_servicer.send(msg).is_err() {
+            // Our reliable servicer has disconnected. Time to quit.
+            self.shutdown = true;
+        }
     }
 
     pub fn receive_iter(&mut self) -> mpsc::Iter<ServicerMessage> {
@@ -82,9 +87,8 @@ impl Server {
     }
 
     pub fn quit(mut self) {
-        // Tell the TCP listener to shut down, then join.
+        // Tell the TCP listener to shut down.
         self.listener_kill_switch.store(false, Ordering::Relaxed);
-        self.listener_join_handle.join();
 
         // Disconnect servicer message queues. This informs the servicers to disconnect from their
         // sockets and join their parent thread.

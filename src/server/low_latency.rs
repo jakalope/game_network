@@ -10,7 +10,7 @@ use serde;
 use bincode;
 use spmc;
 use bidir_map;
-use util::{drain_spmc_receiver, maybe_receive_udp};
+use util::{drain_spmc_receiver, maybe_receive_from_udp};
 
 
 /// Represents a message from the application thread to the low latency servicer, bound for the
@@ -142,7 +142,7 @@ impl Servicer {
 
     // Receive inputs from the network.
     fn forward_from_client_to_server(&mut self) -> Result<(), msg::CommError> {
-        match maybe_receive_udp(&self.udp_socket) {
+        match maybe_receive_from_udp(&self.udp_socket) {
             Ok(Some((buf, src))) => self.process_udp(src, &buf),
             Ok(None) => Ok(()),
             Err(err) => Err(err),

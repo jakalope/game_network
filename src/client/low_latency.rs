@@ -9,7 +9,7 @@ use std::io::Read;
 use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std;
-use util::drain_mpsc_receiver;
+use util::{MAX_PACKET_SIZE, drain_mpsc_receiver, maybe_receive_udp};
 
 /// Represents messages a client application thread can send to a client low latency servicer
 /// thread.
@@ -46,7 +46,9 @@ impl Servicer {
         from_application: mpsc::Receiver<ApplicationMessage>,
     ) -> std::io::Result<Self> {
         udp_socket.connect(&server_addr)?;
-        udp_socket.set_nonblocking(true)?;
+        udp_socket.set_read_timeout(
+            Some(std::time::Duration::from_millis(4)),
+        )?;
         let local_addr = udp_socket.local_addr()?;
         Ok(Servicer {
             receive_buf: vec![],
@@ -85,26 +87,18 @@ impl Servicer {
     }
 
     fn forward_from_server_to_client(&mut self) -> Result<(), msg::CommError> {
-        loop {
-            self.receive_buf.clear();
-            match self.udp_socket.recv(&mut self.receive_buf) {
-                Ok(_) => {
-                    // Deserialize the received datagram.
-                    let server_message: msg::low_latency::ServerMessage =
-                        bincode::deserialize(&self.receive_buf[..]).map_err(|err| {
-                            msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
-                        })?;
-                    return self.parse_server_message(server_message);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Assuming here that `WouldBlock` implies there is no data in the buffer.
-                    return Ok(());
-                }
-                Err(err) => {
-                    return Err(msg::CommError::from(err));
-                }
-            };
+        // Receive data if present.
+        let buf = maybe_receive_udp(&self.udp_socket)?;
+        if buf.is_empty() {
+            return Ok(());
         }
+
+        // Deserialize the received datagram.
+        let server_message: msg::low_latency::ServerMessage = bincode::deserialize(&buf[..])
+            .map_err(|err| {
+                msg::CommError::Warning(msg::Warning::FailedToDeserialize(err))
+            })?;
+        self.parse_server_message(server_message)
     }
 
     fn parse_server_message(
@@ -116,7 +110,7 @@ impl Servicer {
                 // Send it on to the client application thread.
                 return self.to_application
                     .send(ServicerMessage::WorldState(state))
-                    .map_err(|err| {
+                    .map_err(|_| {
                         msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
                     });
             }
@@ -136,6 +130,7 @@ impl Servicer {
                 return self.send_controller_inputs();
             }
             Err(_) => {
+                // Our application thread has disconnected our message queue. Time to exit.
                 return Err(msg::CommError::Exit);
             }
         }
@@ -166,6 +161,14 @@ impl Servicer {
             let encoded: Vec<u8> = bincode::serialize(&controller_input).map_err(|err| {
                 msg::CommError::Warning(msg::Warning::FailedToSerialize(err))
             })?;
+
+            if encoded.len() > MAX_PACKET_SIZE {
+                // If the server doesn't acknowledge our controller inputs fast enough, we will
+                // eventually run out of space in our controller sequence packets. This should be
+                // considered a disconnect since the only way to recover would be to pause the game
+                // clock for all players.
+                return Err(msg::CommError::Exit);
+            }
 
             self.udp_socket
                 .send_to(&encoded, self.server_addr)

@@ -169,7 +169,10 @@ impl Client {
         // Send the chat string to the reliable servicer, who forwards it to the server. The server
         // is responsible for populating the username attached to the chat message.
         let msg = reliable::ApplicationMessage::ChatMessage(chat_msg);
-        self.to_reliable_servicer.send(msg);
+        if self.to_reliable_servicer.send(msg).is_err() {
+            // Our reliable servicer queue has been disconnected. Time to shutdown.
+            self.shutdown = true;
+        }
     }
 
     pub fn take_world_state(&mut self) -> Option<Vec<u8>> {
