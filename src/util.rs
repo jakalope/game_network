@@ -163,7 +163,9 @@ mod tests {
     #[test]
     fn maybe_receive_from_no_data_test() {
         let mut socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::from_millis(1)));
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+            .unwrap();
         let actual = maybe_receive_from_udp(&socket).unwrap();
         assert_eq!(None, actual);
     }
@@ -183,7 +185,9 @@ mod tests {
     #[test]
     fn maybe_receive_no_data_test() {
         let mut socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::from_millis(1)));
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+            .unwrap();
         let actual = maybe_receive_udp(&socket).unwrap();
         assert_eq!(Vec::<u8>::new(), actual);
     }

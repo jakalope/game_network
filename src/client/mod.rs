@@ -7,6 +7,7 @@ use serde;
 use std::net::{TcpStream, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::io::Read;
+use util;
 
 mod reliable;
 mod low_latency;
@@ -27,14 +28,13 @@ pub struct Client {
 
     from_reliable_servicer: mpsc::Receiver<reliable::ServicerMessage>,
     to_reliable_servicer: mpsc::Sender<reliable::ApplicationMessage>,
-    reliable_spin_handle: std::thread::JoinHandle<()>,
 
     from_low_latency_servicer: mpsc::Receiver<low_latency::ServicerMessage>,
     to_low_latency_servicer: mpsc::Sender<low_latency::ApplicationMessage>,
-    low_latency_spin_handle: std::thread::JoinHandle<()>,
 }
 
 impl Client {
+    /// Creates a valid Server connection. Upon success, generates a new Client object.
     pub fn connect(
         username: msg::Username,
         password: String,
@@ -86,8 +86,8 @@ impl Client {
         )?;
 
         // Spin up the servicer threads.
-        let reliable_spin_handle = std::thread::spawn(move || reliable_servicer.spin());
-        let low_latency_spin_handle = std::thread::spawn(move || low_latency_servicer.spin());
+        std::thread::spawn(move || reliable_servicer.spin());
+        std::thread::spawn(move || low_latency_servicer.spin());
 
         // Put the client object together.
         Ok(Client {
@@ -97,51 +97,21 @@ impl Client {
             shutdown: false,
             from_reliable_servicer: from_re_servicer,
             to_reliable_servicer: to_re_servicer,
-            reliable_spin_handle: reliable_spin_handle,
             from_low_latency_servicer: from_ll_servicer,
             to_low_latency_servicer: to_ll_servicer,
-            low_latency_spin_handle: low_latency_spin_handle,
         })
     }
 
-    fn drain_from_reliable(&mut self) {
-        loop {
-            match self.from_reliable_servicer.try_recv() {
-                Err(mpsc::TryRecvError::Empty) => {
-                    return;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.shutdown = true;
-                }
-                Ok(next_msg) => {
-                    match next_msg {
-                        reliable::ServicerMessage::ChatMessage(chat) => {
-                            self.chat_history.push(chat);
-                        }
-                    }
-                }
-            };
-        }
-    }
-
-    fn drain_from_low_latency(&mut self) {
-        loop {
-            match self.from_low_latency_servicer.try_recv() {
-                Err(mpsc::TryRecvError::Empty) => {
-                    return;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.shutdown = true;
-                }
-                Ok(next_msg) => {
-                    match next_msg {
-                        low_latency::ServicerMessage::WorldState(world_state) => {
-                            self.world_state = Some(world_state);
-                        }
-                    }
-                }
-            };
-        }
+    /// Disconnect all servicer queues, which tells their threads to join.
+    /// This method consumes the Client object it is called on, ensuring no other methods can be
+    /// called on it.
+    pub fn quit(mut self) {
+        // Disconnect servicer message queues. This informs the servicers to disconnect from their
+        // sockets and join their parent thread.
+        drop(self.from_reliable_servicer);
+        drop(self.to_reliable_servicer);
+        drop(self.from_low_latency_servicer);
+        drop(self.to_low_latency_servicer);
     }
 
     /// If the servicer is still connected, we add `controller_input` to the list of unacknowledged
@@ -150,56 +120,102 @@ impl Client {
     ///
     /// Returns `false` if there is no connection to the server or if there was a problem
     /// compressing the control sequence. Otherwise returns `true`.
-    pub fn send_controller_input(&mut self, controller_input: bitvec::BitVec) -> bool {
+    pub fn send_controller_input(
+        &mut self,
+        controller_input: bitvec::BitVec,
+    ) -> Result<(), msg::ApplicationError> {
         if self.shutdown {
-            return false;
+            return Err(msg::ApplicationError::Shutdown);
         }
+
         let msg = low_latency::ApplicationMessage::Control(controller_input);
         if self.to_low_latency_servicer.send(msg).is_err() {
             self.shutdown = true;
-            return false;
+            Err(msg::ApplicationError::Shutdown)
+        } else {
+            Ok(())
         }
-        true
     }
 
-    pub fn send_chat_message(&mut self, chat_msg: String) {
+    /// Sends a chat message to the server.
+    pub fn send_chat_message(&mut self, chat_msg: String) -> Result<(), msg::ApplicationError> {
         if self.shutdown {
-            return;
+            return Err(msg::ApplicationError::Shutdown);
         }
+
         // Send the chat string to the reliable servicer, who forwards it to the server. The server
         // is responsible for populating the username attached to the chat message.
         let msg = reliable::ApplicationMessage::ChatMessage(chat_msg);
         if self.to_reliable_servicer.send(msg).is_err() {
             // Our reliable servicer queue has been disconnected. Time to shutdown.
             self.shutdown = true;
+            Err(msg::ApplicationError::Shutdown)
+        } else {
+            Ok(())
         }
     }
 
-    pub fn take_world_state(&mut self) -> Option<Vec<u8>> {
+    /// Consumes the latest world-state (currently just an opaque byte vector) sent to us from the
+    /// server.
+    pub fn take_world_state(&mut self) -> Result<Vec<u8>, msg::ApplicationError> {
         if self.shutdown {
-            return None;
+            return Err(msg::ApplicationError::Shutdown);
         }
+
         // Drain the incoming message queue from our low latency servicer before giving away our
         // world state (which comes from the low latency servicer).
-        self.drain_from_low_latency();
+        let msg_vec = util::drain_mpsc_receiver(&mut self.from_low_latency_servicer)
+            .map_err(|err| {
+                self.shutdown = true;
+                msg::ApplicationError::Shutdown
+            })?;
+
+        for msg in msg_vec {
+            match msg {
+                low_latency::ServicerMessage::WorldState(world_state) => {
+                    self.world_state = Some(world_state);
+                }
+            }
+        }
 
         // Use a swap trick to give away our internal data without invalidating its variable.
         let mut world_state = None;
         std::mem::swap(&mut self.world_state, &mut world_state);
-        world_state
+
+        match world_state {
+            Some(ws) => Ok(ws),
+            None => Ok(vec![]),
+        }
     }
 
-    pub fn take_chat_history(&mut self) -> Vec<msg::reliable::ChatMessage> {
+    /// Consumes all previously unconsumed chat history from the server.
+    pub fn take_chat_history(
+        &mut self,
+    ) -> Result<Vec<msg::reliable::ChatMessage>, msg::ApplicationError> {
         if self.shutdown {
-            return vec![];
+            return Err(msg::ApplicationError::Shutdown);
         }
+
         // Drain the incoming message queue from our reliable servicer before giving away our chat
         // history (which comes from the reliable servicer).
-        self.drain_from_reliable();
+        let msg_vec = util::drain_mpsc_receiver(&mut self.from_reliable_servicer)
+            .map_err(|err| {
+                self.shutdown = true;
+                msg::ApplicationError::Shutdown
+            })?;
+
+        for msg in msg_vec {
+            match msg {
+                reliable::ServicerMessage::ChatMessage(chat) => {
+                    self.chat_history.push(chat);
+                }
+            }
+        }
 
         // Use a swap trick to give away our internal data without invalidating its variable.
         let mut chat_history = vec![];
         std::mem::swap(&mut self.chat_history, &mut chat_history);
-        chat_history
+
+        Ok(chat_history)
     }
 }

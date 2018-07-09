@@ -71,14 +71,35 @@ impl Server {
         }
     }
 
-    pub fn send_low_latency(&mut self, msg: low_latency::ApplicationMessage) {
-        self.to_low_latency_servicer.send(msg);
+    pub fn send_low_latency(
+        &mut self,
+        msg: low_latency::ApplicationMessage,
+    ) -> Result<(), msg::ApplicationError> {
+        if self.shutdown {
+            return Err(msg::ApplicationError::Shutdown);
+        }
+        if self.to_low_latency_servicer.send(msg).is_err() {
+            // Our low latency servicer has disconnected. Time to quit.
+            self.shutdown = true;
+            Err(msg::ApplicationError::Shutdown)
+        } else {
+            Ok(())
+        }
     }
 
-    pub fn send_reliable(&mut self, msg: reliable::ApplicationMessage) {
+    pub fn send_reliable(
+        &mut self,
+        msg: reliable::ApplicationMessage,
+    ) -> Result<(), msg::ApplicationError> {
+        if self.shutdown {
+            return Err(msg::ApplicationError::Shutdown);
+        }
         if self.to_reliable_servicer.send(msg).is_err() {
             // Our reliable servicer has disconnected. Time to quit.
             self.shutdown = true;
+            Err(msg::ApplicationError::Shutdown)
+        } else {
+            Ok(())
         }
     }
 
@@ -86,6 +107,9 @@ impl Server {
         self.from_servicer.iter()
     }
 
+    /// Disconnect all servicer queues, which tells their threads to join.
+    /// This method consumes the Client object it is called on, ensuring no other methods can be
+    /// called on it.
     pub fn quit(mut self) {
         // Tell the TCP listener to shut down.
         self.listener_kill_switch.store(false, Ordering::Relaxed);

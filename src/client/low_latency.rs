@@ -108,17 +108,17 @@ impl Servicer {
         match server_message {
             msg::low_latency::ServerMessage::WorldState(state) => {
                 // Send it on to the client application thread.
-                return self.to_application
+                self.to_application
                     .send(ServicerMessage::WorldState(state))
                     .map_err(|_| {
                         msg::CommError::Drop(msg::Drop::ApplicationThreadDisconnected)
-                    });
+                    })
             }
             msg::low_latency::ServerMessage::LastTickReceived(tick) => {
                 // Update the controller sequence, removing inputs of ticks already received by the
                 // server.
                 self.controller_seq.remove_till_tick(tick);
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -127,11 +127,11 @@ impl Servicer {
         match drain_mpsc_receiver(&mut self.from_application) {
             Ok(mut msg_vec) => {
                 self.parse_application_messages(&mut msg_vec);
-                return self.send_controller_inputs();
+                self.send_controller_inputs()
             }
             Err(_) => {
                 // Our application thread has disconnected our message queue. Time to exit.
-                return Err(msg::CommError::Exit);
+                Err(msg::CommError::Exit)
             }
         }
     }

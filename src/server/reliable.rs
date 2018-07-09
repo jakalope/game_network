@@ -141,7 +141,9 @@ impl Servicer {
         (server_running, join_handle)
     }
 
-    pub fn new(
+    // The TCP listener from the `listen()` method, above, calls this method to instantiate a new
+    // reliable servicer, attached to a single client.
+    fn new(
         mut tcp_stream: TcpStream,
         server_running: std::sync::Arc<AtomicBool>,
         to_application: mpsc::Sender<server::ServicerMessage>,

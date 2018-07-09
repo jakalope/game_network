@@ -61,6 +61,11 @@ pub enum CommError {
     Exit,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ApplicationError {
+    Shutdown,
+}
+
 impl From<std::io::Error> for CommError {
     fn from(err: std::io::Error) -> CommError {
         match err.kind() {
