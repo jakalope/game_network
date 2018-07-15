@@ -10,7 +10,7 @@ extern crate bidir_map;
 extern crate spmc;
 
 #[macro_use]
-mod msg;
+pub mod msg;
 
 pub mod bitvec;
 mod control;
