@@ -36,7 +36,7 @@ pub struct Client {
 impl Client {
     /// Creates a valid Server connection. Upon success, generates a new Client object.
     pub fn connect(
-        username: msg::Username,
+        username: String,
         password: String,
         mut server_addr: SocketAddr,
     ) -> Result<Self, msg::CommError> {
@@ -56,7 +56,7 @@ impl Client {
 
         // Setup the credentials.
         let cred = msg::Credentials {
-            username: username,
+            username: msg::Username(username),
             password: password,
             udp_port: local_udp_addr.port(),
         };
