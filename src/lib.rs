@@ -12,7 +12,7 @@ extern crate spmc;
 #[macro_use]
 mod msg;
 
-mod bitvec;
+pub mod bitvec;
 mod control;
 mod util;
 pub mod server;
